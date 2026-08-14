@@ -296,6 +296,9 @@ const ja: typeof en = {
   "remote.deviceBlockHint":
     "ブロックした端末は切断され、再接続できません（再度ペアリングリンクが必要）。他の端末には影響しません。", // Block hint
   "remote.devicesEmpty": "ペアリング済みの端末はありません", // No paired devices yet
+  "remote.autoRestartHint":
+    "リモートアクセスはアプリの再起動時に自動的に再開されます。「サーバーを停止」で無効になります。", // Remote access restarts automatically when the app is reopened. Stop Server turns this off.
+  "remote.autostartFailed": "自動起動に失敗しました:", // Automatic start failed:
 
   // ── Remote connection panel ──
   "connect.title": "リモートサーバーに接続", // Connect to Remote Server

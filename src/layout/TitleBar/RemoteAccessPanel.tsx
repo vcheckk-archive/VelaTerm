@@ -1,7 +1,7 @@
 //! Desktop remote-access panel for controlling the web service, setting a password, and displaying
 //! LAN addresses. Devices on the same network can open an address and authenticate to use the desktop UI.
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useT } from "../../i18n";
 import { Backdrop } from "../../components/Backdrop";
 import {
@@ -27,8 +27,10 @@ export function RemoteAccessPanel({
   const t = useT();
   const [status, setStatus] = useState<WebServerStatus | null>(null);
   const [password, setPassword] = useState("");
-  // Listening port defaults to 8799 and remains editable in case it is occupied.
+  // Listening port defaults to 8799 and remains editable in case it is occupied. The first status load
+  // prefills the last persisted port unless the user already typed one.
   const [port, setPort] = useState("8799");
+  const portTouched = useRef(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [copiedUrl, setCopiedUrl] = useState<string | null>(null);
@@ -49,7 +51,13 @@ export function RemoteAccessPanel({
 
   useEffect(() => {
     webServerStatus()
-      .then(setStatus)
+      .then((s) => {
+        setStatus(s);
+        // Restore the last used port after restart/remount instead of hardcoding 8799.
+        if (s.savedPort != null && !portTouched.current) {
+          setPort(String(s.savedPort));
+        }
+      })
       .catch(() => setStatus(null));
   }, []);
 
@@ -232,6 +240,17 @@ export function RemoteAccessPanel({
               <span style={{ fontSize: 12, color: "var(--text)" }}>
                 {t("remote.running", status?.port ?? 0)}
               </span>
+            </div>
+
+            <div
+              style={{
+                fontSize: 11,
+                color: "var(--text-dim)",
+                lineHeight: 1.5,
+                marginBottom: 8,
+              }}
+            >
+              {t("remote.autoRestartHint")}
             </div>
 
             {status && status.fingerprint && (
@@ -454,7 +473,10 @@ export function RemoteAccessPanel({
                 inputMode="numeric"
                 value={port}
                 placeholder="8799"
-                onChange={(e) => setPort(e.target.value.replace(/[^0-9]/g, ""))}
+                onChange={(e) => {
+                  portTouched.current = true;
+                  setPort(e.target.value.replace(/[^0-9]/g, ""));
+                }}
                 onKeyDown={(e) => {
                   if (e.key === "Enter") void start();
                 }}
@@ -500,6 +522,19 @@ export function RemoteAccessPanel({
               {busy ? t("remote.starting") : t("remote.start")}
             </button>
           </>
+        )}
+
+        {status?.autostartError && (
+          <div
+            style={{
+              marginTop: 10,
+              fontSize: 11,
+              color: "var(--danger, #ff6b6b)",
+              lineHeight: 1.4,
+            }}
+          >
+            {t("remote.autostartFailed")} {status.autostartError}
+          </div>
         )}
 
         {error && (

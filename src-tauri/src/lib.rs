@@ -662,6 +662,24 @@ fn run_with_builder(builder: tauri::Builder<tauri::Wry>, initial_open_project: O
             let hooks = HookServer::start(AppCtx::Tauri(app.handle().clone()))?;
             app.manage(hooks);
 
+            // Auto-start LAN remote access when the persisted enabled flag is set, restoring the state
+            // from before the last quit (GitHub issue #15). On a thread because start() synchronously
+            // preflights the port bind. Failures (e.g. port in use) are recorded on the WebServer and
+            // shown in the remote-access panel — never fatal for app startup.
+            {
+                let handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    match command_core::web_server_autostart(&AppCtx::Tauri(handle)) {
+                        Ok(Some(status)) => println!(
+                            "remote access auto-started on port {}",
+                            status.port.unwrap_or(0)
+                        ),
+                        Ok(None) => {}
+                        Err(e) => eprintln!("remote access auto-start failed: {e}"),
+                    }
+                });
+            }
+
             // Install macOS session-aware notification click handling; unsupported builds skip it.
             #[cfg(target_os = "macos")]
             notify_native::install(app.handle().clone());
@@ -1094,7 +1112,12 @@ fn serve_main(args: &ServeArgs) -> Result<(), String> {
              For production use the default TLS mode, or HTTPS with certificate pinning (see architecture §20)."
         ));
     }
-    let status = web.start(ctx.clone(), &args.password, Some(args.port), mode)?;
+    let status = web.start(
+        ctx.clone(),
+        crate::web::StartAuth::Password(args.password.clone()),
+        Some(args.port),
+        mode,
+    )?;
 
     println!("vlx-term headless server started");
     println!("  data dir: {}", data_dir.display());
@@ -1130,6 +1153,19 @@ fn serve_main(args: &ServeArgs) -> Result<(), String> {
     if let Some(fp) = &status.fingerprint {
         println!("  certificate fingerprint (SHA-256): {fp}");
     }
+    // Auto-start the secondary LAN remote instance (ctx.remote_web()) when persisted settings enable it,
+    // e.g. remote access turned on from the Electron shell before a sidecar restart. Runs after the
+    // primary CLI-configured server so a port conflict deterministically hits this secondary instance,
+    // where it is logged and nonfatal — the CLI server semantics stay untouched.
+    match command_core::web_server_autostart(&ctx) {
+        Ok(Some(remote)) => println!(
+            "  remote access auto-started on port {}",
+            remote.port.unwrap_or(0)
+        ),
+        Ok(None) => {}
+        Err(e) => eprintln!("  remote access auto-start failed: {e}"),
+    }
+
     println!("  press Ctrl+C (or send SIGTERM) to quit");
 
     // Wait for cross-platform Ctrl+C and Unix SIGTERM used by systemd stop.

@@ -1,3 +1,9 @@
+## Chưa phát hành
+
+### Truy cập từ xa
+
+- **Chia sẻ giờ đây tồn tại qua lần khởi động lại.** Trước đây token ghép nối được tạo lại mỗi khi máy chủ khởi động: chỉ cần đóng rồi mở lại VelaTerm là mọi liên kết đã chia sẻ âm thầm mất hiệu lực, và mọi điện thoại đều phải ghép nối lại. Giờ đây token, các thiết bị đã ghép nối và danh sách thiết bị bị chặn được lưu vào một tệp trong thư mục dữ liệu mà chỉ chủ sở hữu đọc được: thiết bị đã ghép nối sẽ kết nối lại bằng URL đã lưu sau khi khởi động lại — mật khẩu truy cập vẫn là yếu tố thứ hai bắt buộc — và thiết bị đã bị thu hồi vẫn bị thu hồi. VelaTerm cũng ghi nhớ rằng chia sẻ đang bật: thoát ứng dụng khi máy chủ đang chạy thì lần khởi chạy tiếp theo sẽ tự động bật lại trên cùng cổng, cả trong ứng dụng máy tính lẫn trên máy chủ không giao diện chạy `--serve`; nếu bạn tự dừng máy chủ thì sẽ không có gì tự khởi động. Nếu khởi động tự động thất bại, chẳng hạn vì cổng đang bị chiếm, ứng dụng vẫn khởi động bình thường và bảng truy cập từ xa hiển thị lý do. Ô nhập cổng giờ ghi nhớ cổng bạn đã thực sự dùng thay vì quay về giá trị mặc định, và "Tạo lại liên kết" vẫn là công tắc vô hiệu hóa tường minh: nó lập tức phát hành token mới, làm mất hiệu lực mọi liên kết cũ và ghi đè trạng thái đã lưu. Bản thân mật khẩu truy cập không bao giờ được ghi ra đĩa — chỉ lưu một hàm băm tiêu tốn bộ nhớ (Argon2id).
+
 ## v0.1.100 — 2026-08-10
 
 ### Tác nhân AI

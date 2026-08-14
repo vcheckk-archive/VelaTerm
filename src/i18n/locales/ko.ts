@@ -296,6 +296,9 @@ const ko: typeof en = {
   "remote.deviceBlockHint":
     "차단된 기기는 연결이 끊기고 다시 연결할 수 없습니다(새 페어링 링크 필요). 다른 기기에는 영향이 없습니다.", // Block hint
   "remote.devicesEmpty": "페어링된 기기가 없습니다", // No paired devices yet
+  "remote.autoRestartHint":
+    "원격 액세스는 앱을 다시 열면 자동으로 다시 시작됩니다. \"서버 중지\"로 끌 수 있습니다.", // Remote access restarts automatically when the app is reopened. Stop Server turns this off.
+  "remote.autostartFailed": "자동 시작 실패:", // Automatic start failed:
 
   // ── Remote connection panel ──
   "connect.title": "원격 서버에 연결", // Connect to Remote Server

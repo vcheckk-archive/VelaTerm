@@ -292,6 +292,9 @@ const zhCN: typeof en = {
   "remote.deviceBlockHint":
     "被禁设备会被断开且无法重连（需重新用配对链接），其他设备不受影响。", // Block hint
   "remote.devicesEmpty": "暂无已配对设备", // No paired devices yet
+  "remote.autoRestartHint":
+    "重新打开应用时远程访问会自动恢复，「停止服务」可关闭此功能。", // Remote access restarts automatically when the app is reopened. Stop Server turns this off.
+  "remote.autostartFailed": "自动启动失败：", // Automatic start failed:
 
   // ── Remote connection panel ──
   "connect.title": "连接远程服务",

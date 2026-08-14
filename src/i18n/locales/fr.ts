@@ -297,6 +297,9 @@ const fr: typeof en = {
   "remote.deviceBlockHint":
     "Les appareils bloqués sont déconnectés et ne peuvent pas se reconnecter (un nouveau lien d'appairage est nécessaire). Les autres appareils ne sont pas affectés.", // Block hint
   "remote.devicesEmpty": "Aucun appareil appairé", // No paired devices yet
+  "remote.autoRestartHint":
+    "L'accès distant redémarre automatiquement à la réouverture de l'application. « Arrêter le serveur » le désactive.", // Remote access restarts automatically when the app is reopened. Stop Server turns this off.
+  "remote.autostartFailed": "Échec du démarrage automatique :", // Automatic start failed:
 
   // ── Remote connection panel ──
   "connect.title": "Se connecter à un serveur distant", // Connect to Remote Server

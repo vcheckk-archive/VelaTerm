@@ -297,6 +297,9 @@ const de: typeof en = {
   "remote.deviceBlockHint":
     "Gesperrte Geräte werden getrennt und können sich nicht erneut verbinden (ein neuer Kopplungslink ist nötig). Andere Geräte sind nicht betroffen.", // Block hint
   "remote.devicesEmpty": "Keine gekoppelten Geräte", // No paired devices yet
+  "remote.autoRestartHint":
+    "Der Fernzugriff startet beim erneuten Öffnen der App automatisch. „Server stoppen“ schaltet das ab.", // Remote access restarts automatically when the app is reopened. Stop Server turns this off.
+  "remote.autostartFailed": "Automatischer Start fehlgeschlagen:", // Automatic start failed:
 
   // ── Remote connection panel ──
   "connect.title": "Mit Remote-Server verbinden", // Connect to Remote Server

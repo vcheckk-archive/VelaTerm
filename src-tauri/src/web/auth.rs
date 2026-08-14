@@ -1,26 +1,32 @@
-//! Web-service authentication: password login, session-token gating, per-run pairing token, and devices.
+//! Web-service authentication: password login, session-token gating, persistent pairing token, and devices.
 //!
-//! - Passwords are held only as salted SHA-256 hashes in memory, with a new random salt per process.
+//! - Passwords are verified against a memory-hard Argon2id PHC string; the salt lives inside the PHC
+//!   string and no plaintext password is ever persisted.
 //! - Successful HTTP login creates a random in-memory session token returned in JSON. Clients present it
 //!   through `Authorization: Bearer` or WebSocket `?token=`. Cookies were removed because domain-wide,
 //!   port-agnostic sharing caused windows to overwrite one another's credentials.
-//! - Each service start creates a new shared pairing-admission token embedded in pairing links; restarting
-//!   invalidates old links with the previous AuthState.
-//! - Clients self-report device ID and name during handshake for an in-memory display registry. Rotation
+//! - The shared pairing-admission token embedded in pairing links persists in the data directory
+//!   (`access_store`), so restarting the app or server keeps old links valid. Only the explicit rotate
+//!   action replaces the token and invalidates every link.
+//! - Clients self-report device ID and name during handshake for a display registry. The registry and the
+//!   blocklist persist alongside the token, so a revoked device stays revoked across restarts. Rotation
 //!   replaces the shared token and requires every device to reconnect.
 
 use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+use argon2::password_hash::rand_core::OsRng;
+use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
+use argon2::Argon2;
 use axum::extract::State;
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::Json;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use super::Ctx;
+use super::{access_store, Ctx};
 
 /// Registered device self-reported during handshake and kept in memory for display only.
 #[derive(Clone, Serialize, Deserialize)]
@@ -42,44 +48,97 @@ fn now_secs() -> u64 {
 
 pub struct AuthState {
     inner: Mutex<Inner>,
+    /// Data directory for write-through persistence of token, registry, and blocklist.
+    store_dir: PathBuf,
 }
 
 struct Inner {
-    salt: String,
-    hash: String,
-    /// HTTP session tokens used by plaintext and legacy authentication paths.
+    /// Argon2id PHC verifier string; the salt is embedded, no plaintext password is held.
+    verifier_phc: String,
+    /// HTTP session tokens used by plaintext and legacy authentication paths. Deliberately not
+    /// persisted: password-login windows re-authenticate after a restart; only pairing survives.
     tokens: HashSet<String>,
-    /// Shared admission token for this run, embedded in pairing links and replaced by `rotate`.
+    /// Shared admission token embedded in pairing links, persisted and replaced only by `rotate`.
     pairing_token: String,
-    /// In-memory display registry of client-reported devices.
+    /// Display registry of client-reported devices, persisted with the token.
     devices: Vec<DeviceEntry>,
     /// Blocked device IDs. E2EE handshake rejects reconnection, and heartbeat disconnects active matches.
-    /// This in-memory set is cleared with the registry on rotation or restart.
+    /// Persisted so revocations survive restarts; cleared together with the registry on rotation.
     blocked: HashSet<String>,
 }
 
+/// Hash a plaintext password into an Argon2id PHC string (default parameters: memory-hard, ~tens of
+/// milliseconds per verify). The PHC string is the only password-derived value ever persisted.
+pub fn hash_password(password: &str) -> Result<String, String> {
+    let salt = SaltString::generate(&mut OsRng);
+    Argon2::default()
+        .hash_password(password.as_bytes(), &salt)
+        .map(|h| h.to_string())
+        .map_err(|e| format!("Failed to hash password: {e}"))
+}
+
 impl AuthState {
-    /// Create an in-memory salted password hash, a fresh pairing token, and an empty registry. Each service
-    /// start constructs a new AuthState, naturally invalidating the previous run's token.
-    pub fn new(password: &str) -> Self {
-        let salt = Uuid::new_v4().to_string();
-        let hash = hash_pw(&salt, password);
+    /// Load the persisted pairing token, device registry, and blocklist from the data directory, or
+    /// create a fresh token and write the file when it is missing or corrupt (the E2EE key pattern).
+    /// The Argon2id PHC verifier comes from the caller; it is never stored in the pairing-state file.
+    pub fn load_or_create(verifier_phc: &str, data_dir: &Path) -> Self {
+        let (pairing_token, devices, blocked) = match access_store::load(data_dir) {
+            Some(p) => (
+                p.pairing_token,
+                p.devices,
+                p.blocked_devices.into_iter().collect(),
+            ),
+            None => {
+                let token = new_token();
+                if let Err(e) = access_store::save(
+                    data_dir,
+                    &access_store::PersistedAccess {
+                        pairing_token: token.clone(),
+                        blocked_devices: Vec::new(),
+                        devices: Vec::new(),
+                    },
+                ) {
+                    // Nonfatal: the service still works for this run; only restart persistence degrades.
+                    eprintln!("failed to persist remote-access state: {e}");
+                }
+                (token, Vec::new(), HashSet::new())
+            }
+        };
         Self {
             inner: Mutex::new(Inner {
-                salt,
-                hash,
+                verifier_phc: verifier_phc.to_string(),
                 tokens: HashSet::new(),
-                pairing_token: new_token(),
-                devices: Vec::new(),
-                blocked: HashSet::new(),
+                pairing_token,
+                devices,
+                blocked,
             }),
+            store_dir: data_dir.to_path_buf(),
+        }
+    }
+
+    /// Write the current pairing state through to disk. Called with the lock held so concurrent
+    /// mutations cannot persist out of order; failures are logged and the in-memory state stays valid.
+    fn persist(&self, inner: &Inner) {
+        let access = access_store::PersistedAccess {
+            pairing_token: inner.pairing_token.clone(),
+            blocked_devices: inner.blocked.iter().cloned().collect(),
+            devices: inner.devices.clone(),
+        };
+        if let Err(e) = access_store::save(&self.store_dir, &access) {
+            eprintln!("failed to persist remote-access state: {e}");
         }
     }
 
     fn verify(&self, password: &str) -> bool {
-        let inner = self.inner.lock().unwrap();
-        let got = hash_pw(&inner.salt, password);
-        constant_time_eq(got.as_bytes(), inner.hash.as_bytes())
+        // Clone the PHC string out of the lock: Argon2id verification is deliberately slow and must not
+        // stall unrelated token checks.
+        let phc = self.inner.lock().unwrap().verifier_phc.clone();
+        let Ok(parsed) = PasswordHash::new(&phc) else {
+            return false;
+        };
+        Argon2::default()
+            .verify_password(password.as_bytes(), &parsed)
+            .is_ok()
     }
 
     /// Verify the password against the hash shared by HTTP login and E2EE's second factor.
@@ -100,13 +159,15 @@ impl AuthState {
 
     /// Rotate the pairing token and clear devices, effectively replacing links for everyone. Existing
     /// connections retain negotiated keys; the new token blocks only new and reconnecting clients. Restart
-    /// the service to disconnect all clients immediately.
+    /// the service to disconnect all clients immediately. The persisted file is overwritten, so rotation
+    /// remains the explicit invalidation path for the now restart-surviving token.
     pub fn rotate_pairing_token(&self) -> String {
         let mut inner = self.inner.lock().unwrap();
         inner.pairing_token = new_token();
         inner.devices.clear();
         // Full reset: invalidate old links, require every device to pair again, and clear the blocklist.
         inner.blocked.clear();
+        self.persist(&inner);
         inner.pairing_token.clone()
     }
 
@@ -135,6 +196,7 @@ impl AuthState {
                 last_seen_at: now,
             });
         }
+        self.persist(&inner);
     }
 
     /// List devices registered during this run, distinguished by self-reported identifiers.
@@ -150,6 +212,7 @@ impl AuthState {
         inner.blocked.insert(device_id.to_string());
         let before = inner.devices.len();
         inner.devices.retain(|d| d.device_id != device_id);
+        self.persist(&inner);
         inner.devices.len() < before
     }
 
@@ -182,21 +245,6 @@ impl AuthState {
 /// Generate an unpredictable token by joining two simple UUID strings.
 fn new_token() -> String {
     Uuid::new_v4().simple().to_string() + &Uuid::new_v4().simple().to_string()
-}
-
-fn hash_pw(salt: &str, password: &str) -> String {
-    let mut h = Sha256::new();
-    h.update(salt.as_bytes());
-    h.update(password.as_bytes());
-    hex(&h.finalize())
-}
-
-fn hex(bytes: &[u8]) -> String {
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        s.push_str(&format!("{b:02x}"));
-    }
-    s
 }
 
 /// Constant-time comparison for equal-length values to avoid hash timing side channels.
@@ -268,12 +316,25 @@ pub async fn logout(State(ctx): State<Ctx>, headers: HeaderMap) -> impl IntoResp
 
 #[cfg(test)]
 mod tests {
-    use super::AuthState;
+    use super::{hash_password, AuthState};
+    use std::path::PathBuf;
+
+    fn tempdir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("vlx-auth-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Test constructor: hash the plaintext once and build the state in a tag-specific tempdir.
+    fn new_auth(password: &str, dir: &PathBuf) -> AuthState {
+        AuthState::load_or_create(&hash_password(password).unwrap(), dir)
+    }
 
     #[test]
     fn password_verify_and_token_lifecycle() {
-        let auth = AuthState::new("s3cret");
-        // Password verification.
+        let dir = tempdir("pw");
+        let auth = new_auth("s3cret", &dir);
+        // Password verification against the Argon2id PHC verifier.
         assert!(auth.verify("s3cret"));
         assert!(!auth.verify("wrong"));
         assert!(!auth.verify(""));
@@ -284,11 +345,13 @@ mod tests {
         assert!(!auth.check("not-a-token"));
         auth.revoke(&token);
         assert!(!auth.check(&token));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn pairing_token_rotate_and_device_registry() {
-        let auth = AuthState::new("pw");
+        let dir = tempdir("rotate");
+        let auth = new_auth("pw", &dir);
         // The run's pairing token is stable and verifiable.
         let tok = auth.pairing_token();
         assert!(auth.validate_pairing_token(&tok));
@@ -308,11 +371,13 @@ mod tests {
         assert!(!auth.validate_pairing_token(&tok));
         assert!(auth.validate_pairing_token(&tok2));
         assert_eq!(auth.list_devices().len(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn block_device_blocks_and_rotate_clears() {
-        let auth = AuthState::new("pw");
+        let dir = tempdir("block");
+        let auth = new_auth("pw", &dir);
         auth.register_device(Some("dev-a"), Some("Mac"));
         auth.register_device(Some("dev-b"), Some("Phone"));
 
@@ -335,5 +400,63 @@ mod tests {
         auth.rotate_pairing_token();
         assert!(!auth.is_blocked("dev-a"));
         assert!(!auth.is_blocked("dev-x"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Token, device registry, and blocklist survive a "restart" (a second AuthState from the same
+    /// directory), which is exactly the invariant GitHub issue #15 demands.
+    #[test]
+    fn pairing_state_persists_across_instances() {
+        let dir = tempdir("persist");
+        let phc = hash_password("pw").unwrap();
+
+        let a = AuthState::load_or_create(&phc, &dir);
+        let token = a.pairing_token();
+        a.register_device(Some("dev-a"), Some("Phone"));
+        a.register_device(Some("dev-b"), Some("Tablet"));
+        assert!(a.block_device("dev-b"));
+
+        // A fresh instance from the same data dir sees the same token, registry, and blocklist.
+        let b = AuthState::load_or_create(&phc, &dir);
+        assert_eq!(b.pairing_token(), token);
+        assert!(b.validate_pairing_token(&token));
+        assert_eq!(b.list_devices().len(), 1);
+        assert_eq!(b.list_devices()[0].device_id, "dev-a");
+        assert!(b.is_blocked("dev-b"));
+        assert!(!b.is_blocked("dev-a"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Rotation overwrites the persisted file: a later instance sees the new token and empty blocklist.
+    #[test]
+    fn rotate_persists_new_token_and_clears_state() {
+        let dir = tempdir("rotate-persist");
+        let phc = hash_password("pw").unwrap();
+
+        let a = AuthState::load_or_create(&phc, &dir);
+        let old = a.pairing_token();
+        a.register_device(Some("dev-a"), Some("Phone"));
+        a.block_device("dev-x");
+        let rotated = a.rotate_pairing_token();
+        assert_ne!(old, rotated);
+
+        let b = AuthState::load_or_create(&phc, &dir);
+        assert_eq!(b.pairing_token(), rotated);
+        assert!(!b.validate_pairing_token(&old));
+        assert!(b.list_devices().is_empty());
+        assert!(!b.is_blocked("dev-x"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// hash_password produces a PHC verifier that accepts the original password and rejects others.
+    #[test]
+    fn hash_password_roundtrip() {
+        let dir = tempdir("hash");
+        let phc = hash_password("correct horse").unwrap();
+        assert!(phc.starts_with("$argon2id$"), "expected Argon2id PHC, got: {phc}");
+        let auth = AuthState::load_or_create(&phc, &dir);
+        assert!(auth.verify_password("correct horse"));
+        assert!(!auth.verify_password("battery staple"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

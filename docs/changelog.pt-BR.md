@@ -1,3 +1,9 @@
+## Não lançado
+
+### Acesso remoto
+
+- **O compartilhamento agora sobrevive a uma reinicialização.** O token de pareamento era gerado de novo a cada inicialização do servidor, então fechar e reabrir o VelaTerm invalidava silenciosamente todos os links compartilhados, e cada telefone precisava ser pareado outra vez. O token, os dispositivos pareados e a lista de dispositivos bloqueados agora são salvos em um arquivo do diretório de dados legível apenas pelo proprietário: um dispositivo já pareado se reconecta com sua URL salva após uma reinicialização — a senha de acesso continua sendo um segundo fator obrigatório — e um dispositivo revogado permanece revogado. O VelaTerm também lembra que o compartilhamento estava ativo: feche o aplicativo com o servidor em execução e a próxima inicialização o retoma na mesma porta, tanto no aplicativo de desktop quanto em um servidor sem interface com `--serve`; se você mesmo o parar, nada inicia automaticamente. Se o início automático falhar, por exemplo porque a porta está ocupada, o aplicativo abre normalmente e o painel de acesso remoto mostra o motivo. O campo de porta agora lembra a porta realmente usada em vez de voltar ao padrão, e "Regenerar link" continua sendo o interruptor de emergência explícito: ele emite um novo token na hora, invalida todos os links antigos e sobrescreve o estado salvo. A senha de acesso em si nunca é gravada no disco — apenas um hash de alto custo de memória (Argon2id) é armazenado.
+
 ## v0.1.100 — 2026-08-10
 
 ### Agentes de IA

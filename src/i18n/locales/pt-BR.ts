@@ -297,6 +297,9 @@ const ptBR: typeof en = {
   "remote.deviceBlockHint":
     "Dispositivos bloqueados são desconectados e não podem reconectar (precisam de um novo link de emparelhamento). Os outros dispositivos não são afetados.", // Block hint
   "remote.devicesEmpty": "Nenhum dispositivo emparelhado", // No paired devices yet
+  "remote.autoRestartHint":
+    "O acesso remoto reinicia automaticamente ao reabrir o aplicativo. \"Parar servidor\" desativa isso.", // Remote access restarts automatically when the app is reopened. Stop Server turns this off.
+  "remote.autostartFailed": "Falha no início automático:", // Automatic start failed:
 
   // ── Remote connection panel ──
   "connect.title": "Conectar a servidor remoto", // Connect to Remote Server

@@ -1,9 +1,17 @@
 # Changelog
 
-> Created: 2026-07-09 16:10 · Updated: 2026-08-11
+> Created: 2026-07-09 16:10 · Updated: 2026-08-14
 
 All notable changes to VelaTerm are documented here, newest first.
 v0.1.91 is the first public release; earlier version numbers were internal iterations and are not covered.
+
+---
+
+## Unreleased
+
+### Remote access
+
+- **Sharing survives a restart.** The pairing token used to be regenerated every time the server started, so quitting and reopening VelaTerm silently invalidated every shared link, and every phone had to be paired again. The token, the paired devices and the device blocklist are now saved to an owner-only file in the data directory: a previously paired device reconnects with its saved URL after a restart — the access password stays a required second factor — and a revoked device stays revoked. VelaTerm also remembers that sharing was on: quit while the server is running and the next launch brings it back on the same port, in the desktop app and on a headless `--serve` server alike; stop it yourself and nothing starts automatically. If the automatic start fails, because the port is taken for example, the app starts normally and the remote-access panel shows the reason. The port field now remembers the port you actually used instead of resetting to the default, and "Regenerate link" remains the explicit kill switch: it issues a new token at once, invalidates every old link, and overwrites the saved state. The access password itself is never written to disk — only a memory-hard hash (Argon2id) is stored.
 
 ---
 

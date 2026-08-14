@@ -1,3 +1,9 @@
+## Unveröffentlicht
+
+### Fernzugriff
+
+- **Das Teilen überlebt jetzt einen Neustart.** Das Kopplungs-Token wurde bisher bei jedem Serverstart neu erzeugt: Wer VelaTerm beendete und wieder öffnete, machte damit stillschweigend jeden geteilten Link ungültig, und jedes Handy musste neu gekoppelt werden. Das Token, die gekoppelten Geräte und die Geräte-Sperrliste werden jetzt in einer nur für den Besitzer lesbaren Datei im Datenverzeichnis gespeichert: Ein bereits gekoppeltes Gerät verbindet sich nach einem Neustart mit seiner gespeicherten URL – das Zugangspasswort bleibt als zweiter Faktor Pflicht – und ein widerrufenes Gerät bleibt widerrufen. VelaTerm merkt sich außerdem, dass das Teilen aktiv war: Wer die App bei laufendem Server beendet, bekommt ihn beim nächsten Start automatisch auf demselben Port zurück, in der Desktop-App ebenso wie auf einem Server ohne Oberfläche mit `--serve`; wer ihn selbst stoppt, bei dem startet nichts automatisch. Schlägt der automatische Start fehl, etwa weil der Port belegt ist, startet die App normal, und das Fernzugriffs-Panel zeigt den Grund an. Das Port-Feld merkt sich jetzt den tatsächlich verwendeten Port, statt auf den Standardwert zurückzuspringen, und „Link neu erzeugen“ bleibt der ausdrückliche Notausschalter: Es erzeugt sofort ein neues Token, macht alle alten Links ungültig und überschreibt den gespeicherten Zustand. Das Zugangspasswort selbst wird nie auf die Festplatte geschrieben – gespeichert wird ausschließlich ein speicherharter Hash (Argon2id).
+
 ## v0.1.100 — 2026-08-10
 
 ### KI-Agenten

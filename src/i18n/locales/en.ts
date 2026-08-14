@@ -295,6 +295,9 @@ const en = {
   "remote.deviceBlockHint":
     "Blocked devices are disconnected and can't reconnect (they'd need a new pairing link). Other devices are unaffected.",
   "remote.devicesEmpty": "No paired devices yet",
+  "remote.autoRestartHint":
+    "Remote access restarts automatically when the app is reopened. Stop Server turns this off.",
+  "remote.autostartFailed": "Automatic start failed:",
 
   // ── Remote connection panel ──
   "connect.title": "Connect to Remote Server",

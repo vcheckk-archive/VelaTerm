@@ -293,6 +293,9 @@ const vi: typeof en = {
   "remote.deviceBlockHint":
     "Thiết bị bị chặn sẽ mất kết nối và không thể kết nối lại (cần liên kết ghép đôi mới). Các thiết bị khác không bị ảnh hưởng.",
   "remote.devicesEmpty": "Chưa có thiết bị ghép đôi",
+  "remote.autoRestartHint":
+    "Truy cập từ xa sẽ tự khởi động lại khi mở lại ứng dụng. \"Dừng máy chủ\" sẽ tắt tính năng này.", // Remote access restarts automatically when the app is reopened. Stop Server turns this off.
+  "remote.autostartFailed": "Tự động khởi động thất bại:", // Automatic start failed:
   "connect.title": "Kết nối máy chủ từ xa",
   "connect.pairingPlaceholder": "Dán liên kết ghép đôi",
   "connect.confirmConnect": "Dấu vân tay khớp, kết nối",

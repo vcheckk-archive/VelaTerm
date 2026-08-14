@@ -1,3 +1,9 @@
+## Sin publicar
+
+### Acceso remoto
+
+- **Compartir ahora sobrevive a un reinicio.** El token de emparejamiento se regeneraba cada vez que arrancaba el servidor, así que cerrar y volver a abrir VelaTerm invalidaba en silencio todos los enlaces compartidos y había que emparejar cada teléfono de nuevo. El token, los dispositivos emparejados y la lista de dispositivos bloqueados se guardan ahora en un archivo del directorio de datos legible solo por su propietario: un dispositivo ya emparejado se reconecta con su URL guardada tras un reinicio —la contraseña de acceso sigue siendo un segundo factor obligatorio— y un dispositivo revocado sigue revocado. VelaTerm también recuerda que el uso compartido estaba activo: si cierra la aplicación con el servidor en marcha, el siguiente arranque lo recupera en el mismo puerto, tanto en la aplicación de escritorio como en un servidor sin interfaz con `--serve`; si lo detiene usted mismo, nada arranca automáticamente. Si el arranque automático falla, por ejemplo porque el puerto está ocupado, la aplicación se inicia con normalidad y el panel de acceso remoto muestra el motivo. El campo de puerto recuerda ahora el puerto realmente usado en lugar de volver al valor predeterminado, y «Regenerar enlace» sigue siendo el interruptor de emergencia explícito: genera un token nuevo al instante, invalida todos los enlaces antiguos y sobrescribe el estado guardado. La contraseña de acceso nunca se escribe en el disco: solo se guarda un hash de memoria dura (Argon2id).
+
 ## v0.1.100 — 2026-08-10
 
 ### Agentes de IA

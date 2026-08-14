@@ -307,6 +307,9 @@ const ru: typeof en = {
   "remote.deviceBlockHint":
     "Заблокированные устройства отключаются и не могут переподключиться (нужна новая ссылка сопряжения). Другие устройства не затрагиваются.", // Block hint
   "remote.devicesEmpty": "Нет сопряжённых устройств", // No paired devices yet
+  "remote.autoRestartHint":
+    "Удалённый доступ автоматически возобновляется при повторном открытии приложения. «Остановить сервер» отключает это.", // Remote access restarts automatically when the app is reopened. Stop Server turns this off.
+  "remote.autostartFailed": "Сбой автоматического запуска:", // Automatic start failed:
 
   // ── Remote connection panel ──
   "connect.title": "Подключиться к удалённому серверу", // Connect to Remote Server

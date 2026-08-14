@@ -1,3 +1,9 @@
+## Non publié
+
+### Accès à distance
+
+- **Le partage survit désormais à un redémarrage.** Le jeton d'appairage était régénéré à chaque démarrage du serveur : fermer puis rouvrir VelaTerm invalidait silencieusement tous les liens partagés, et chaque téléphone devait être appairé à nouveau. Le jeton, les appareils appairés et la liste des appareils bloqués sont désormais enregistrés dans un fichier du répertoire de données lisible uniquement par son propriétaire : un appareil déjà appairé se reconnecte avec son URL enregistrée après un redémarrage — le mot de passe d'accès reste un second facteur obligatoire — et un appareil révoqué reste révoqué. VelaTerm se souvient aussi que le partage était actif : quittez l'application pendant que le serveur tourne, et le prochain lancement le relance sur le même port, dans l'application de bureau comme sur un serveur sans interface avec `--serve` ; arrêtez-le vous-même, et rien ne démarre automatiquement. Si le démarrage automatique échoue, par exemple parce que le port est occupé, l'application démarre normalement et le panneau d'accès à distance en affiche la raison. Le champ du port retient désormais le port réellement utilisé au lieu de revenir à la valeur par défaut, et « Régénérer le lien » reste le coupe-circuit explicite : il émet immédiatement un nouveau jeton, invalide tous les anciens liens et écrase l'état enregistré. Le mot de passe d'accès lui-même n'est jamais écrit sur le disque — seul un hachage exigeant en mémoire (Argon2id) est conservé.
+
 ## v0.1.100 — 2026-08-10
 
 ### Agents IA
