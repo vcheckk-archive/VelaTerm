@@ -19,7 +19,7 @@ use crate::files;
 use crate::host::AppCtx;
 use crate::models::SessionKind;
 use crate::pty::manager::{PtyManager, SpawnResult};
-use crate::web::{DeviceEntry, PairingInfo, WebServer};
+use crate::web::{DeviceEntry, PairingInfo};
 
 /// Take and clear an unconsumed `vela <path>` request. The frontend checks after installing its
 /// listener; second-instance events use the same wake-only event plus queued payload to avoid races.
@@ -391,23 +391,23 @@ pub fn save_doc_image(doc_path: String, bytes: Vec<u8>, ext: String) -> Result<S
 /// `address` chooses the interface IP; rotate replaces the token, invalidates old links, and clears devices.
 #[tauri::command]
 pub fn web_pairing_create(
-    state: State<WebServer>,
+    app: AppHandle,
     address: Option<String>,
     rotate: Option<bool>,
 ) -> Result<PairingInfo, String> {
-    state.create_pairing(address, rotate.unwrap_or(false))
+    crate::command_core::web_pairing_create(&AppCtx::Tauri(app), address, rotate.unwrap_or(false))
 }
 
 /// List paired devices that have actually connected for the management panel.
 #[tauri::command]
-pub fn web_devices_list(state: State<WebServer>) -> Vec<DeviceEntry> {
-    state.list_devices()
+pub fn web_devices_list(app: AppHandle) -> Vec<DeviceEntry> {
+    crate::command_core::web_devices_list(&AppCtx::Tauri(app))
 }
 
 /// Remove a device registration display entry. Shared links can still reconnect; rotate to revoke all.
 #[tauri::command]
-pub fn web_device_revoke(state: State<WebServer>, device_id: String) -> bool {
-    state.revoke_device(&device_id)
+pub fn web_device_revoke(app: AppHandle, device_id: String) -> bool {
+    crate::command_core::web_device_revoke(&AppCtx::Tauri(app), &device_id)
 }
 
 // ─────────────────────────── Remote connection window ───────────────────────────

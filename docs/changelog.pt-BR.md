@@ -1,3 +1,9 @@
+## Não lançado
+
+### Correções
+
+- **O emparelhamento agora pode ser gerenciado no shell Electron.** Criar um link de emparelhamento, listar os dispositivos emparelhados e revogar um dispositivo só existiam como comandos de desktop (Tauri); o despachante WebSocket usado pelo shell Electron e pelos clientes de navegador respondia "Unknown command", deixando o painel de acesso remoto inoperante ali. Os três comandos agora passam pelas mesmas funções centrais nos dois transportes, de modo que não podem divergir, e testes de regressão cobrem as novas rotas de despacho — incluindo a criação de um link de emparelhamento real contra um servidor local em execução.
+
 ## v0.1.100 — 2026-08-10
 
 ### Agentes de IA
