@@ -274,6 +274,11 @@ const zhCN: typeof en = {
   "remote.start": "开启服务",
   "remote.portLabel": "端口",
   "remote.portInvalid": "端口必须是 1 到 65535 之间的数字",
+  "remote.ipLabel": "IP 地址", // IP address
+  "remote.ipAuto": "自动（第一个局域网地址）", // Automatic (first LAN address)
+  "remote.ipVpn": "VPN", // VPN
+  "remote.qrHint":
+    "用手机扫码即可在所选地址上打开配对链接。", // Scan with your phone to open the pairing link on the selected address.
   "remote.fingerprintLabel": "证书指纹（SHA-256）",
   "remote.fingerprintHint":
     "首次连接时浏览器会提示证书不受信任，这是自签证书的正常现象；核对此指纹可确认连接的是本机。",

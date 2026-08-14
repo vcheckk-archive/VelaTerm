@@ -1,5 +1,9 @@
 ## Sin publicar
 
+### Acceso remoto
+
+- **Elija qué dirección usa el enlace para compartir: las direcciones de Tailscale ahora aparecen.** La lista de direcciones solo aceptaba los rangos IPv4 privados clásicos, por lo que las mallas VPN como Tailscale, que asignan direcciones del rango de NAT de operador (100.64.0.0/10), quedaban descartadas silenciosamente del panel de acceso remoto y del enlace de emparejamiento, aunque el servidor ya era accesible a través de ellas. Estas direcciones ahora se listan; los túneles VPN quedan al final para que nunca se conviertan en la opción predeterminada. Un nuevo selector de IP en el panel —visible antes de iniciar y con el servidor en marcha— muestra cada candidata con el nombre de su interfaz y marca los túneles VPN; al elegir una, su URL pasa al frente y el enlace de emparejamiento se regenera con exactamente ese host, de modo que el enlace copiado funciona en un dispositivo que solo alcanza esta máquina a través de la VPN, sin editar la URL a mano. Un código QR bajo el enlace de emparejamiento permite escanearlo directamente con el teléfono. La selección se recuerda; si la interfaz elegida desaparece, el panel vuelve a «Automático» sin olvidarla. El servidor en sí no cambia y sigue escuchando en todas las interfaces.
+
 ### Correcciones
 
 - **El emparejamiento ya se puede gestionar desde el shell de Electron.** Crear un enlace de emparejamiento, listar los dispositivos emparejados y revocar un dispositivo solo existían como comandos de escritorio (Tauri); el despachador WebSocket que usan el shell de Electron y los clientes de navegador respondía «Unknown command», dejando inservible el panel de acceso remoto en ese entorno. Los tres comandos pasan ahora por las mismas funciones centrales en ambos transportes, de modo que no pueden divergir, y pruebas de regresión cubren las nuevas rutas de despacho, incluida la creación de un enlace de emparejamiento real contra un servidor local en ejecución.

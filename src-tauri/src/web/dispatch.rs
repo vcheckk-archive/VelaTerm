@@ -448,6 +448,9 @@ pub fn dispatch(app: &AppCtx, cmd: &str, args: &Value, source: &str) -> Result<V
             Ok(Value::Null)
         }
         "web_server_status" => to_value(core::web_server_status(app)),
+        // Stateless interface enumeration for the panel's IP selector; the module is called directly
+        // because no AppCtx is involved, and desktop_call routes the desktop shell through here too.
+        "network_interfaces_list" => to_value(crate::web::network_interfaces_list()),
         // Pairing management mirrors the Tauri commands so the Electron/browser remote-access panel
         // works over WebSocket exactly like the desktop panel does over Tauri IPC.
         "web_pairing_create" => to_value(core::web_pairing_create(
@@ -662,6 +665,77 @@ mod tests {
             .as_str()
             .expect("deviceToken missing after rotation");
         assert_ne!(rotated_token, first_token, "rotate must issue a new token");
+
+        // Stop the server so the test leaves no background thread behind.
+        app.remote_web().stop();
+    }
+
+    /// The IP-selector command is routed by dispatch (covering both transports via desktop_call) and
+    /// returns an array of {name, ip, vpn} objects. Content is machine-dependent, so only the shape
+    /// and the machine-independent ordering contract are asserted; an empty list is valid.
+    #[test]
+    fn network_interfaces_list_is_dispatched_with_shape() {
+        let app = test_ctx();
+        let result = dispatch(&app, "network_interfaces_list", &json!({}), DESKTOP_SOURCE)
+            .expect("network_interfaces_list must be routed, not an unknown command");
+        let list = result.as_array().expect("expected a JSON array");
+        // Ordering contract of iface_candidates: broadcast-capable LAN interfaces come first, so once
+        // a vpn=true entry has appeared, no vpn=false entry may follow.
+        let mut seen_vpn = false;
+        for entry in list {
+            assert!(entry["name"].is_string(), "name must be a string: {entry}");
+            assert!(entry["ip"].is_string(), "ip must be a string: {entry}");
+            let vpn = entry["vpn"]
+                .as_bool()
+                .unwrap_or_else(|| panic!("vpn must be a boolean: {entry}"));
+            assert!(
+                !(seen_vpn && !vpn),
+                "LAN entries must precede VPN entries, but {entry} follows a VPN entry"
+            );
+            seen_vpn = seen_vpn || vpn;
+        }
+    }
+
+    /// Documents the contract the IP selector builds on: the pairing link host is exactly the address
+    /// argument, verbatim, even for a CGNAT (Tailscale) address the server is not bound to. The server
+    /// runs on loopback only; the address is a pure URL string, no network access to 100.x occurs.
+    #[test]
+    fn pairing_create_uses_selected_cgnat_address_as_host() {
+        let app = test_ctx();
+
+        // Same retry pattern as above: the probed ephemeral port can be stolen before the server binds.
+        let mut port = 0;
+        let mut started = Err("never attempted".to_string());
+        for _ in 0..5 {
+            port = std::net::TcpListener::bind(("127.0.0.1", 0))
+                .expect("failed to bind an ephemeral port")
+                .local_addr()
+                .expect("failed to read the ephemeral port")
+                .port();
+            started = app.remote_web().start(
+                app.clone(),
+                "test-pw",
+                Some(port),
+                crate::web::ServeMode::LoopbackHttp,
+            );
+            if started.is_ok() {
+                break;
+            }
+        }
+        started.expect("failed to start the loopback web server after retries");
+
+        let info = dispatch(
+            &app,
+            "web_pairing_create",
+            &json!({ "address": "100.100.5.5", "rotate": false }),
+            DESKTOP_SOURCE,
+        )
+        .expect("pairing creation failed on a running server");
+        let url = info["url"].as_str().expect("url missing from PairingInfo");
+        assert!(
+            url.starts_with(&format!("http://100.100.5.5:{port}/#pair=")),
+            "pairing URL must carry the selected address as host: {url}"
+        );
 
         // Stop the server so the test leaves no background thread behind.
         app.remote_web().stop();

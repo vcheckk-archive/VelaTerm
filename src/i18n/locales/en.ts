@@ -277,6 +277,11 @@ const en = {
   "remote.start": "Start Server",
   "remote.portLabel": "Port",
   "remote.portInvalid": "Port must be between 1 and 65535",
+  "remote.ipLabel": "IP address",
+  "remote.ipAuto": "Automatic (first LAN address)",
+  "remote.ipVpn": "VPN",
+  "remote.qrHint":
+    "Scan with your phone to open the pairing link on the selected address.",
   "remote.fingerprintLabel": "Certificate fingerprint (SHA-256)",
   "remote.fingerprintHint":
     "On first connect, browsers warn the certificate is untrusted — normal for a self-signed certificate. Match this fingerprint to confirm you're connecting to this machine.",

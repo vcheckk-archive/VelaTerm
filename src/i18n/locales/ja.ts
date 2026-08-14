@@ -278,6 +278,11 @@ const ja: typeof en = {
   "remote.start": "サーバーを開始", // Start Server
   "remote.portLabel": "ポート", // Port
   "remote.portInvalid": "ポートは 1〜65535 の範囲で指定してください", // Port must be between 1 and 65535
+  "remote.ipLabel": "IP アドレス", // IP address
+  "remote.ipAuto": "自動（最初の LAN アドレス）", // Automatic (first LAN address)
+  "remote.ipVpn": "VPN", // VPN
+  "remote.qrHint":
+    "スマートフォンでスキャンすると、選択したアドレスでペアリングリンクを開けます。", // Scan with your phone to open the pairing link on the selected address.
   "remote.fingerprintLabel": "証明書フィンガープリント (SHA-256)", // Certificate fingerprint (SHA-256)
   "remote.fingerprintHint":
     "初回接続時、ブラウザは証明書が信頼されていないと警告します（自己署名証明書では正常です）。このフィンガープリントを照合し、この端末への接続であることを確認してください。", // On first connect, browsers warn the certificate is untrusted…

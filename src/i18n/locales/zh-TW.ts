@@ -275,6 +275,11 @@ const zhTW: typeof en = {
   "remote.start": "啟動服務", // Start Server
   "remote.portLabel": "連接埠", // Port
   "remote.portInvalid": "連接埠必須是 1 到 65535 之間的數字", // Port must be between 1 and 65535
+  "remote.ipLabel": "IP 位址", // IP address
+  "remote.ipAuto": "自動（第一個區域網路位址）", // Automatic (first LAN address)
+  "remote.ipVpn": "VPN", // VPN
+  "remote.qrHint":
+    "用手機掃描即可在所選位址上開啟配對連結。", // Scan with your phone to open the pairing link on the selected address.
   "remote.fingerprintLabel": "憑證指紋（SHA-256）", // Certificate fingerprint (SHA-256)
   "remote.fingerprintHint":
     "首次連線時瀏覽器會提示憑證不受信任，這是自簽憑證的正常現象；核對此指紋可確認連線的是本機。", // On first connect, browsers warn the certificate is untrusted…

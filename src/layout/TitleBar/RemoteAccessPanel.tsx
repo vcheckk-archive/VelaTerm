@@ -2,9 +2,11 @@
 //! LAN addresses. Devices on the same network can open an address and authenticate to use the desktop UI.
 
 import { useEffect, useState } from "react";
+import { QRCodeSVG } from "qrcode.react";
 import { useT } from "../../i18n";
 import { Backdrop } from "../../components/Backdrop";
 import {
+  networkInterfacesList,
   webDeviceRevoke,
   webDevicesList,
   webPairingCreate,
@@ -12,9 +14,32 @@ import {
   webServerStatus,
   webServerStop,
   type DeviceEntry,
+  type NetworkInterface,
   type WebServerStatus,
 } from "../../ipc/webServer";
 import { copyText } from "../../ipc/info";
+import { invoke } from "../../ipc/transport";
+
+/** app_settings key persisting the selected advertised IP; empty string means automatic (backend default). */
+const SHARE_IP_KEY = "vlx-share-ip";
+
+/**
+ * Move URLs whose host is exactly `ip` to the front, keeping backend order otherwise.
+ * Host comparison is exact (up to `:` or `/` after the scheme), so `10.0.0.1` never matches `10.0.0.11`.
+ */
+export function orderUrlsBySelectedIp(urls: string[], ip: string): string[] {
+  if (!ip) return urls;
+  const hostOf = (u: string) => {
+    const start = u.indexOf("://");
+    if (start < 0) return "";
+    const rest = u.slice(start + 3);
+    const end = rest.search(/[/:]/);
+    return end < 0 ? rest : rest.slice(0, end);
+  };
+  const hits = urls.filter((u) => hostOf(u) === ip);
+  if (hits.length === 0) return urls;
+  return [...hits, ...urls.filter((u) => hostOf(u) !== ip)];
+}
 
 export function RemoteAccessPanel({
   onClose,
@@ -46,12 +71,27 @@ export function RemoteAccessPanel({
   const [confirmId, setConfirmId] = useState<string | null>(null);
   // Device currently being revoked, used to disable duplicate actions.
   const [blockBusy, setBlockBusy] = useState(false);
+  // Selectable interface candidates for the advertised-IP selector.
+  const [ifaces, setIfaces] = useState<NetworkInterface[]>([]);
+  // Persisted advertised-IP selection; empty string means automatic (backend picks the first LAN address).
+  const [selectedIp, setSelectedIp] = useState("");
 
   useEffect(() => {
     webServerStatus()
       .then(setStatus)
       .catch(() => setStatus(null));
+    networkInterfacesList()
+      .then(setIfaces)
+      .catch(() => setIfaces([]));
+    // Restore the persisted selection; a missing key or failure keeps automatic.
+    invoke<Record<string, string>>("get_app_settings")
+      .then((s) => setSelectedIp(s[SHARE_IP_KEY] ?? ""))
+      .catch(() => {});
   }, []);
+
+  // A persisted IP that is currently absent (e.g. VPN down) falls back to automatic without erasing
+  // the stored value; only an explicit re-selection overwrites it.
+  const effectiveIp = ifaces.some((i) => i.ip === selectedIp) ? selectedIp : "";
 
   // Report status after initial discovery or service changes, only when running/port actually changes.
   useEffect(() => {
@@ -72,6 +112,21 @@ export function RemoteAccessPanel({
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [status?.running]);
+
+  // Regenerate the pairing link when the effective selection changes while running, so the link, QR,
+  // and primary URL follow it. Also covers the persisted setting arriving after the automatic pairing.
+  useEffect(() => {
+    if (status?.running && pairUrl) void genPairing(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [effectiveIp]);
+
+  // Persist the selection and apply it immediately; the effect above regenerates the link if running.
+  const chooseIp = (ip: string) => {
+    setSelectedIp(ip);
+    void invoke("set_app_settings", {
+      entries: { [SHARE_IP_KEY]: ip },
+    }).catch(() => {});
+  };
 
   const start = async () => {
     if (!password.trim()) {
@@ -115,7 +170,7 @@ export function RemoteAccessPanel({
     setPairBusy(true);
     setError("");
     try {
-      const info = await webPairingCreate(undefined, rotate);
+      const info = await webPairingCreate(effectiveIp || undefined, rotate);
       setPairUrl(info.url);
       if (rotate) {
         webDevicesList()
@@ -155,12 +210,67 @@ export function RemoteAccessPanel({
   };
 
   const running = status?.running ?? false;
-  // Prefer the backend's multi-interface URL list and fall back to its single URL.
-  const urls = status?.urls?.length
+  // Prefer the backend's multi-interface URL list and fall back to its single URL. The selected IP's
+  // URL moves to the front so the primary displayed/copied link and the QR carry the chosen host.
+  const baseUrls = status?.urls?.length
     ? status.urls
     : status?.url
       ? [status.url]
       : [];
+  const urls = orderUrlsBySelectedIp(baseUrls, effectiveIp);
+
+  // Advertised-IP selector, shown while stopped (below the port field) and while running (above the
+  // pairing block); one persisted selection drives both.
+  const ipSelector = (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        width: "100%",
+        boxSizing: "border-box",
+        marginBottom: 8,
+        border: "1px solid var(--border)",
+        borderRadius: "var(--r-sm, 6px)",
+        background: "var(--bg-0)",
+        overflow: "hidden",
+      }}
+    >
+      <span
+        style={{
+          padding: "8px 10px",
+          fontSize: 13,
+          color: "var(--text-dim)",
+          whiteSpace: "nowrap",
+          borderRight: "1px solid var(--border)",
+        }}
+      >
+        {t("remote.ipLabel")}
+      </span>
+      <select
+        aria-label={t("remote.ipLabel")}
+        value={effectiveIp}
+        onChange={(e) => chooseIp(e.target.value)}
+        style={{
+          flex: 1,
+          minWidth: 0,
+          padding: "8px 6px",
+          border: "none",
+          background: "transparent",
+          color: "var(--text)",
+          fontSize: 13,
+          outline: "none",
+        }}
+      >
+        <option value="">{t("remote.ipAuto")}</option>
+        {ifaces.map((i) => (
+          <option key={`${i.name}-${i.ip}`} value={i.ip}>
+            {i.ip} · {i.name}
+            {i.vpn ? ` (${t("remote.ipVpn")})` : ""}
+          </option>
+        ))}
+      </select>
+    </div>
+  );
   // Pairing fragments are interface-independent. Reuse the first link's `#pair=...` fragment with each host URL.
   const pairFragment = pairUrl ? pairUrl.slice(pairUrl.indexOf("/#") + 1) : "";
   const pairUrls =
@@ -299,6 +409,8 @@ export function RemoteAccessPanel({
 
             <div style={{ height: 6 }} />
 
+            {ipSelector}
+
             <button
               onClick={() => void genPairing(true)}
               disabled={pairBusy}
@@ -385,6 +497,38 @@ export function RemoteAccessPanel({
                       : t("remote.moreUrls", pairUrls.length - 1)}
                   </button>
                 )}
+                {pairUrls.length > 0 && (
+                  <>
+                    {/* White padded background keeps the QR scannable in the dark theme. */}
+                    <div
+                      style={{
+                        display: "flex",
+                        justifyContent: "center",
+                        padding: 10,
+                        marginBottom: 4,
+                        background: "#fff",
+                        borderRadius: "var(--r-sm, 6px)",
+                      }}
+                    >
+                      <QRCodeSVG
+                        value={pairUrls[0]}
+                        size={160}
+                        level="M"
+                        marginSize={1}
+                      />
+                    </div>
+                    <div
+                      style={{
+                        fontSize: 11,
+                        color: "var(--text-dim)",
+                        lineHeight: 1.5,
+                        marginBottom: 6,
+                      }}
+                    >
+                      {t("remote.qrHint")}
+                    </div>
+                  </>
+                )}
               </>
             )}
 
@@ -470,6 +614,7 @@ export function RemoteAccessPanel({
                 }}
               />
             </div>
+            {ipSelector}
             <input
               type="password"
               value={password}
