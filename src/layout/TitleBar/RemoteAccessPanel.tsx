@@ -356,6 +356,10 @@ export function RemoteAccessPanel({
           top: 44,
           right: 12,
           width: 280,
+          // Cap to the viewport (44px top offset + 12px bottom margin) and scroll, so long content
+          // such as the pairing QR code stays reachable instead of overflowing off-screen.
+          maxHeight: "calc(100vh - 56px)",
+          overflowY: "auto",
           background: "var(--bg-2)",
           border: "1px solid var(--border-strong)",
           borderRadius: "var(--r-md)",
