@@ -790,6 +790,7 @@ const es: typeof en = {
   "login.passwordPlaceholder": "Contraseña de acceso", // Access password
   "login.connect": "Conectar", // Connect
   "login.wrongPassword": "Contraseña incorrecta", // Wrong password
+  "login.rateLimited": "Demasiados intentos. Espera un minuto y vuelve a intentarlo.", // Too many attempts. Please wait a minute and try again.
   "login.failed": "Error de inicio de sesión, inténtalo de nuevo", // Login failed, please try again
   "login.pairingRequired": "Este servidor requiere un enlace de emparejamiento. Abre el enlace generado en el panel de Acceso remoto de la app de escritorio.", // This server requires a pairing link
   "login.authFailed": "Contraseña incorrecta o el enlace de emparejamiento ha caducado. Vuelve a conectarte con un nuevo enlace de emparejamiento.", // Wrong password or pairing link expired

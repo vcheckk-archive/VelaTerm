@@ -790,6 +790,7 @@ const fr: typeof en = {
   "login.passwordPlaceholder": "Mot de passe d'accès", // Access password
   "login.connect": "Se connecter", // Connect
   "login.wrongPassword": "Mot de passe incorrect", // Wrong password
+  "login.rateLimited": "Trop de tentatives. Veuillez patienter une minute avant de réessayer.", // Too many attempts. Please wait a minute and try again.
   "login.failed": "Échec de connexion, veuillez réessayer", // Login failed, please try again
   "login.pairingRequired": "Ce serveur nécessite un lien d'association. Ouvrez le lien généré dans le panneau Accès distant de l'application de bureau.", // This server requires a pairing link
   "login.authFailed": "Mot de passe incorrect ou lien d'association expiré. Veuillez vous reconnecter avec un nouveau lien d'association.", // Wrong password or pairing link expired

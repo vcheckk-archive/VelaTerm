@@ -778,6 +778,7 @@ const ko: typeof en = {
   "login.passwordPlaceholder": "접속 비밀번호", // Access password
   "login.connect": "연결", // Connect
   "login.wrongPassword": "비밀번호가 틀렸습니다", // Wrong password
+  "login.rateLimited": "시도 횟수가 너무 많습니다. 1분 후 다시 시도해 주세요.", // Too many attempts. Please wait a minute and try again.
   "login.failed": "로그인 실패, 다시 시도하세요", // Login failed, please try again
   "login.pairingRequired": "이 서버는 페어링 링크가 필요합니다. 데스크톱 앱의 '원격 액세스'에서 생성한 링크로 여세요.", // This server requires a pairing link
   "login.authFailed": "비밀번호가 틀렸거나 페어링 링크가 만료되었습니다. 새 페어링 링크로 다시 연결하세요.", // Wrong password or pairing link expired

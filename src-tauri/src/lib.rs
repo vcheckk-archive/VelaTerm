@@ -968,6 +968,10 @@ struct ServeArgs {
     /// certificates cannot work. It is CLI-only, rejected by production identifiers, and loses to
     /// `--local-http` when both are supplied.
     lan_http: bool,
+    /// `--print-pairing`: print the full pairing URL including the long-lived `#pair` token fragment even
+    /// when stdout is not a terminal. Without it, non-TTY runs (systemd/journald) get only the token-less
+    /// base URL so the credential does not persist in service logs.
+    print_pairing: bool,
 }
 
 /// Recommended headless password environment variable, avoiding exposure in process arguments.
@@ -983,6 +987,7 @@ fn parse_serve_args(args: &[String], env_password: Option<String>) -> Result<Ser
     let mut data_dir: Option<String> = None;
     let mut local_http = false;
     let mut lan_http = false;
+    let mut print_pairing = false;
 
     let mut it = args.iter().skip(2); // Skip executable name and --serve.
     while let Some(arg) = it.next() {
@@ -1005,6 +1010,9 @@ fn parse_serve_args(args: &[String], env_password: Option<String>) -> Result<Ser
             "--lan-http" => {
                 lan_http = true;
             }
+            "--print-pairing" => {
+                print_pairing = true;
+            }
             other => return Err(format!("unknown argument: {other}")),
         }
     }
@@ -1022,7 +1030,16 @@ fn parse_serve_args(args: &[String], env_password: Option<String>) -> Result<Ser
         data_dir,
         local_http,
         lan_http,
+        print_pairing,
     })
+}
+
+/// Whether `--serve` may print the full pairing URL including the long-lived `#pair` token fragment:
+/// explicitly requested via `--print-pairing`, or stdout is an interactive terminal (a human who needs
+/// the link). Non-TTY stdout without the flag — systemd, pipes — must not receive the credential, since
+/// journald and log files would persist it.
+fn should_print_pairing(flag: bool, is_tty: bool) -> bool {
+    flag || is_tty
 }
 
 /// Headless data directory: explicit --data-dir wins; otherwise use platform data directory plus
@@ -1051,7 +1068,7 @@ pub fn run_serve(args: &[String]) {
         Err(e) => {
             eprintln!("vlx-term --serve failed to start: {e}");
             eprintln!(
-                "usage: vlx-term --serve [--port 8799] [--password <password>] [--data-dir <dir>] [--local-http] [--lan-http]"
+                "usage: vlx-term --serve [--port 8799] [--password <password>] [--data-dir <dir>] [--local-http] [--lan-http] [--print-pairing]"
             );
             std::process::exit(1);
         }
@@ -1123,14 +1140,23 @@ fn serve_main(args: &ServeArgs) -> Result<(), String> {
     println!("  data dir: {}", data_dir.display());
 
     // Print a fully usable preferred URL first. LAN TLS requires the complete #pair fragment with
-    // token/public key; plaintext modes can use their bare URL.
+    // token/public key; plaintext modes can use their bare URL. The fragment carries the long-lived
+    // pairing token, so it is only printed to an interactive terminal or on explicit --print-pairing —
+    // never into journald/service logs, where it would persist (GitHub issue #24).
     let primary = if matches!(mode, crate::web::ServeMode::LanTls) {
-        match web.create_pairing(None, false) {
-            Ok(info) => Some(info.url),
-            Err(e) => {
-                eprintln!("  failed to create pairing link: {e}");
-                None
+        if should_print_pairing(args.print_pairing, std::io::IsTerminal::is_terminal(&std::io::stdout())) {
+            match web.create_pairing(None, false) {
+                Ok(info) => Some(info.url),
+                Err(e) => {
+                    eprintln!("  failed to create pairing link: {e}");
+                    None
+                }
             }
+        } else {
+            println!(
+                "  pairing link withheld (stdout is not a terminal): run with --print-pairing to print it, or create a pairing link from the app"
+            );
+            status.urls.first().cloned()
         }
     } else {
         status.urls.first().cloned()
@@ -1140,7 +1166,9 @@ fn serve_main(args: &ServeArgs) -> Result<(), String> {
     }
     // Print other interface URLs without repeating the long pairing fragment; users can append it.
     if status.urls.len() > 1 {
-        if matches!(mode, crate::web::ServeMode::LanTls) {
+        if matches!(mode, crate::web::ServeMode::LanTls)
+            && primary.as_deref().is_some_and(|u| u.contains("#pair="))
+        {
             println!("  other addresses (swap host, keep the #pair=… part):");
         } else {
             println!("  other addresses:");
@@ -1267,8 +1295,29 @@ mod tests {
                 data_dir: Some("/tmp/x".into()),
                 local_http: false,
                 lan_http: false,
+                print_pairing: false,
             }
         );
+    }
+
+    #[test]
+    fn parse_serve_args_print_pairing_flag() {
+        // --print-pairing opts in to printing the full pairing URL on non-TTY stdout.
+        let got = parse_serve_args(&argv(&["--print-pairing", "--password", "pw"]), None)
+            .expect("parsing should succeed");
+        assert!(got.print_pairing);
+        // Omitting the flag leaves it false.
+        let got = parse_serve_args(&argv(&["--password", "pw"]), None).expect("parsing should succeed");
+        assert!(!got.print_pairing);
+    }
+
+    #[test]
+    fn should_print_pairing_truth_table() {
+        // The explicit flag always wins; otherwise only an interactive terminal receives the fragment.
+        assert!(should_print_pairing(true, true));
+        assert!(should_print_pairing(true, false));
+        assert!(should_print_pairing(false, true));
+        assert!(!should_print_pairing(false, false));
     }
 
     #[test]
@@ -1327,6 +1376,7 @@ mod tests {
             data_dir: Some("/tmp/custom".into()),
             local_http: false,
             lan_http: false,
+            print_pairing: false,
         };
         assert_eq!(
             serve_data_dir(&args, "io.vlinx.vlxterm").unwrap(),

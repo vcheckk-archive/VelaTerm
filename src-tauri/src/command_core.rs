@@ -852,7 +852,20 @@ fn autostart_config(
 pub fn web_server_autostart(
     ctx: &AppCtx,
 ) -> Result<Option<crate::web::WebServerStatus>, String> {
-    let settings = get_app_settings(ctx)?;
+    // Never replace a running instance: a very early manual start would otherwise be stopped and
+    // re-bound with the persisted (possibly older) configuration by the auto-start thread.
+    if ctx.remote_web().status().running {
+        return Ok(None);
+    }
+    // A settings-read failure is an auto-start failure like any other: record it so the panel can show
+    // why nothing started, instead of logging it into the void.
+    let settings = match get_app_settings(ctx) {
+        Ok(s) => s,
+        Err(e) => {
+            ctx.remote_web().set_autostart_error(Some(e.clone()));
+            return Err(e);
+        }
+    };
     let Some((port, lan_http, phc)) = autostart_config(&settings) else {
         return Ok(None);
     };
@@ -961,6 +974,73 @@ mod tests {
         let _ = std::fs::remove_dir_all(tmp.parent().unwrap());
     }
 
+    /// A running instance is never replaced by auto-start: a very early manual start (loopback here, so
+    /// no 0.0.0.0 bind) survives, auto-start returns Ok(None), and the running config stays untouched.
+    #[test]
+    fn autostart_skips_when_an_instance_is_already_running() {
+        let tmp = std::env::temp_dir().join(format!(
+            "vlx-cc-skip-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        let ctx = headless_ctx(&tmp);
+        // Persisted settings that would auto-start on port 9123.
+        seed_remote_settings(&ctx, "0");
+
+        // Simulate the early manual start on a free loopback port (retry against port theft).
+        let mut port = 0;
+        let mut started = Err("never attempted".to_string());
+        for _ in 0..5 {
+            port = std::net::TcpListener::bind(("127.0.0.1", 0))
+                .unwrap()
+                .local_addr()
+                .unwrap()
+                .port();
+            started = ctx.remote_web().start(
+                ctx.clone(),
+                crate::web::StartAuth::Password("manual-pw".into()),
+                Some(port),
+                crate::web::ServeMode::LoopbackHttp,
+            );
+            if started.is_ok() {
+                break;
+            }
+        }
+        started.expect("failed to start the loopback web server after retries");
+
+        let result = web_server_autostart(&ctx).expect("skip must not be an error");
+        assert!(result.is_none(), "auto-start must skip while an instance runs");
+        let status = ctx.remote_web().status();
+        assert!(status.running);
+        assert_eq!(status.port, Some(port), "the manual instance must keep its port");
+
+        ctx.remote_web().stop();
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// A manual stop retires a stale auto-start error so the panel reflects the current state.
+    #[test]
+    fn manual_stop_clears_stale_autostart_error() {
+        let tmp = std::env::temp_dir().join(format!(
+            "vlx-cc-clear-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        let ctx = headless_ctx(&tmp);
+        ctx.remote_web()
+            .set_autostart_error(Some("port in use".into()));
+        assert_eq!(
+            web_server_status(&ctx).autostart_error.as_deref(),
+            Some("port in use")
+        );
+        web_server_stop(&ctx).unwrap();
+        assert!(
+            web_server_status(&ctx).autostart_error.is_none(),
+            "a manual stop must clear the stale autostart error"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
     fn settings(pairs: &[(&str, &str)]) -> HashMap<String, String> {
         pairs
             .iter()
@@ -1028,6 +1108,7 @@ pub fn web_devices_list(ctx: &AppCtx) -> Vec<crate::web::DeviceEntry> {
 }
 
 /// Removes a device registration display entry. Shared links can still reconnect; rotate to revoke all.
-pub fn web_device_revoke(ctx: &AppCtx, device_id: &str) -> bool {
+/// Errors when the revocation cannot be persisted, because it would be undone by the next restart.
+pub fn web_device_revoke(ctx: &AppCtx, device_id: &str) -> Result<bool, String> {
     ctx.remote_web().revoke_device(device_id)
 }

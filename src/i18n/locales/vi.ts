@@ -781,6 +781,7 @@ const vi: typeof en = {
   "login.passwordPlaceholder": "Mật khẩu truy cập",
   "login.connect": "Kết nối",
   "login.wrongPassword": "Sai mật khẩu",
+  "login.rateLimited": "Quá nhiều lần thử. Vui lòng đợi một phút rồi thử lại.", // Too many attempts. Please wait a minute and try again.
   "login.failed": "Đăng nhập thất bại, vui lòng thử lại",
   "login.pairingRequired": "Máy chủ này yêu cầu liên kết ghép đôi. Hãy mở liên kết từ bảng Truy cập từ xa của ứng dụng máy tính.",
   "login.authFailed": "Sai mật khẩu hoặc liên kết ghép đôi đã hết hạn. Hãy kết nối lại bằng liên kết mới.",

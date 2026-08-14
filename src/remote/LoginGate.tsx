@@ -257,6 +257,9 @@ export function LoginGate({ children }: { children: ReactNode }) {
           reloginRejected.current = false;
           setPhase("ready");
         } else setError(t("login.failed"));
+      } else if (r.status === 429) {
+        // Rate-limited by the backend after repeated failures; "wrong password" would mislead here.
+        setError(t("login.rateLimited"));
       } else setError(t("login.wrongPassword"));
     } catch {
       setError(t("login.failed"));

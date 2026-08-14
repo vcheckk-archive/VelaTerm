@@ -781,6 +781,7 @@ const ja: typeof en = {
   "login.passwordPlaceholder": "アクセスパスワード", // Access password
   "login.connect": "接続", // Connect
   "login.wrongPassword": "パスワードが違います", // Wrong password
+  "login.rateLimited": "試行回数が多すぎます。1分ほど待ってから再度お試しください。", // Too many attempts. Please wait a minute and try again.
   "login.failed": "ログインに失敗しました。もう一度お試しください", // Login failed, please try again
   "login.pairingRequired": "このサーバーはペアリングリンクが必要です。デスクトップアプリの「リモートアクセス」で生成したリンクを開いてください。", // This server requires a pairing link
   "login.authFailed": "パスワードが違うか、ペアリングリンクの有効期限が切れています。新しいペアリングリンクで再接続してください。", // Wrong password or pairing link expired

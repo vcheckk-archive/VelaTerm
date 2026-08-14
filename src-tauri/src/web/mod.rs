@@ -13,6 +13,7 @@ mod auth;
 // desktop_call also uses dispatch, so expose it within the crate rather than keeping it private to web transport.
 pub(crate) mod dispatch;
 mod e2ee;
+mod rate_limit;
 mod sniff;
 mod tls;
 pub mod tunnel;
@@ -49,6 +50,8 @@ pub(crate) struct Ctx {
     pub e2ee_keys: Arc<e2ee::ServerKeys>,
     /// Serve mode used by WS to require paired encryption and reject plaintext in network-exposed LanTls mode.
     pub mode: ServeMode,
+    /// Per-instance failed-login limiter, checked before any Argon2 work on `/api/login` and the WS handshake.
+    pub limiter: Arc<rate_limit::LoginRateLimiter>,
 }
 
 /// Public web-service status returned to the frontend in camelCase.
@@ -256,6 +259,7 @@ impl WebServer {
             auth: auth.clone(),
             e2ee_keys: e2ee_keys.clone(),
             mode,
+            limiter: Arc::new(rate_limit::LoginRateLimiter::new()),
         };
         let handle = axum_server::Handle::new();
         let handle_clone = handle.clone();
@@ -297,10 +301,11 @@ impl WebServer {
                             // The TLS acceptor sniffs plaintext HTTP and redirects to HTTPS, avoiding errors when users omit the scheme.
                             let acceptor = axum_server::tls_rustls::RustlsAcceptor::new(config)
                                 .acceptor(sniff::HttpSniff);
+                            // ConnectInfo exposes the peer SocketAddr to handlers for the per-IP login limiter.
                             if let Err(e) = axum_server::bind(addr)
                                 .acceptor(acceptor)
                                 .handle(handle_clone)
-                                .serve(router.into_make_service())
+                                .serve(router.into_make_service_with_connect_info::<std::net::SocketAddr>())
                                 .await
                             {
                                 eprintln!("Web service exited abnormally: {e}");
@@ -310,7 +315,7 @@ impl WebServer {
                             // Local unencrypted path: plain loopback HTTP without TLS acceptor or sniff redirect.
                             if let Err(e) = axum_server::bind(addr)
                                 .handle(handle_clone)
-                                .serve(router.into_make_service())
+                                .serve(router.into_make_service_with_connect_info::<std::net::SocketAddr>())
                                 .await
                             {
                                 eprintln!("Web service exited abnormally: {e}");
@@ -338,12 +343,14 @@ impl WebServer {
         Ok(status_from(port, lan_ips, fingerprint, mode))
     }
 
-    /// Stops the service.
+    /// Stops the service. A manual stop also retires any stale auto-start error: the panel must show the
+    /// current truth, not the failure of a boot that the user has since overridden.
     pub fn stop(&self) {
         if let Some(running) = self.inner.lock().unwrap().take() {
             running.handle.shutdown();
             let _ = running.thread.join();
         }
+        self.set_autostart_error(None);
     }
 
     /// Returns current status, including the last auto-start failure for the panel.
@@ -366,8 +373,9 @@ impl WebServer {
         let guard = self.inner.lock().unwrap();
         let running = guard.as_ref().ok_or("Web server not started")?;
         // Rotate the shared token and clear registrations when requested; otherwise reuse the current token.
+        // A rotation that failed to persist is surfaced: silently succeeding would revive old links on restart.
         let token = if rotate {
-            running.auth.rotate_pairing_token()
+            running.auth.rotate_pairing_token()?
         } else {
             running.auth.pairing_token()
         };
@@ -402,11 +410,12 @@ impl WebServer {
     }
 
     /// Revokes a device by blacklisting and deregistering it. E2EE rejects reconnects and an active connection is
-    /// dropped within one heartbeat; other devices are unaffected. Returns false while stopped.
-    pub fn revoke_device(&self, device_id: &str) -> bool {
+    /// dropped within one heartbeat; other devices are unaffected. Returns false while stopped. Errors when the
+    /// revocation cannot be persisted, because it would otherwise be undone by the next restart.
+    pub fn revoke_device(&self, device_id: &str) -> Result<bool, String> {
         match &*self.inner.lock().unwrap() {
             Some(r) => r.auth.block_device(device_id),
-            None => false,
+            None => Ok(false),
         }
     }
 }
@@ -502,6 +511,30 @@ async fn static_handler(State(_ctx): State<Ctx>, uri: Uri) -> impl IntoResponse 
         )
             .into_response(),
     }
+}
+
+/// Write a secret file so it is owner-only (0600) from the moment it exists, instead of chmod-after-write,
+/// which leaves a window where the file carries default umask permissions. On non-Unix platforms this is a
+/// plain create-truncate write. An idempotent set_permissions afterwards also repairs a pre-existing file
+/// that was created with wider permissions by an older build.
+pub(crate) fn write_owner_only(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut f = options.open(path)?;
+    f.write_all(bytes)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // `mode` applies only at creation; tighten a pre-existing file too.
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
 }
 
 /// Minimal extension-to-MIME mapping that avoids another dependency.
@@ -701,6 +734,114 @@ mod tests {
         }
         web2.stop();
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Raw loopback HTTP POST to /api/login with `Connection: close`, returning the full response text.
+    /// Connecting retries briefly: start() returns once the thread is spawned, slightly before axum's
+    /// async bind actually accepts connections.
+    fn http_post_login(port: u16, password: &str) -> String {
+        use std::io::{Read, Write};
+        let mut stream = None;
+        for _ in 0..100 {
+            match std::net::TcpStream::connect(("127.0.0.1", port)) {
+                Ok(s) => {
+                    stream = Some(s);
+                    break;
+                }
+                Err(_) => std::thread::sleep(std::time::Duration::from_millis(20)),
+            }
+        }
+        let mut stream = stream.expect("web server never started accepting connections");
+        let body = format!("{{\"password\":\"{password}\"}}");
+        let req = format!(
+            "POST /api/login HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        stream.write_all(req.as_bytes()).unwrap();
+        let mut resp = String::new();
+        let _ = stream.read_to_string(&mut resp);
+        resp
+    }
+
+    /// Repeated failed logins are rate-limited per IP: five wrong passwords yield 401, the sixth attempt
+    /// is rejected with 429 before any Argon2 work — even with the correct password — and a correct
+    /// password within the limit returns 200 plus a token. Loopback-only; this also proves the
+    /// ConnectInfo wiring works with axum-server for real connections.
+    #[test]
+    fn login_is_rate_limited_per_ip_before_argon2() {
+        let tmp = std::env::temp_dir().join(format!(
+            "vlx-web-ratelimit-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let db = crate::db::Db::open(&tmp.join("t.db")).unwrap();
+        let host = std::sync::Arc::new(crate::host::HeadlessHost::new(tmp.clone(), db));
+        let ctx = crate::host::AppCtx::Headless(host);
+
+        // Ephemeral-port retry pattern shared with the dispatch tests: the probed port can be stolen.
+        let web = WebServer::new();
+        let mut port = 0;
+        let mut started = Err("never attempted".to_string());
+        for _ in 0..5 {
+            port = free_port();
+            started = web.start(
+                ctx.clone(),
+                StartAuth::Password("right-pw".into()),
+                Some(port),
+                ServeMode::LoopbackHttp,
+            );
+            if started.is_ok() {
+                break;
+            }
+        }
+        started.expect("failed to start the loopback web server after retries");
+
+        // A correct password within the limit succeeds and returns a session token.
+        let ok = http_post_login(port, "right-pw");
+        assert!(ok.starts_with("HTTP/1.1 200"), "expected 200, got: {ok}");
+        assert!(ok.contains("token"), "expected a token body, got: {ok}");
+
+        // Five wrong passwords are individually rejected as 401 (success above cleared the counter).
+        for i in 0..5 {
+            let r = http_post_login(port, "wrong");
+            assert!(r.starts_with("HTTP/1.1 401"), "attempt {i}: expected 401, got: {r}");
+        }
+        // The sixth attempt hits the limiter BEFORE Argon2: even the correct password now yields 429.
+        let blocked = http_post_login(port, "right-pw");
+        assert!(
+            blocked.starts_with("HTTP/1.1 429"),
+            "expected 429 after five failures, got: {blocked}"
+        );
+
+        web.stop();
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// write_owner_only creates secret files with 0600 at open time and repairs looser pre-existing modes.
+    #[cfg(unix)]
+    #[test]
+    fn write_owner_only_creates_and_repairs_0600() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!(
+            "vlx-write-owner-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("secret.txt");
+        super::write_owner_only(&path, b"s3cret").unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+        assert_eq!(std::fs::read(&path).unwrap(), b"s3cret");
+
+        // A pre-existing file with wide permissions is overwritten AND tightened.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        super::write_owner_only(&path, b"rotated").unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+        assert_eq!(std::fs::read(&path).unwrap(), b"rotated");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

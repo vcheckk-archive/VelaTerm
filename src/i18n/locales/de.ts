@@ -790,6 +790,7 @@ const de: typeof en = {
   "login.passwordPlaceholder": "Zugangspasswort", // Access password
   "login.connect": "Verbinden", // Connect
   "login.wrongPassword": "Falsches Passwort", // Wrong password
+  "login.rateLimited": "Zu viele Versuche. Bitte eine Minute warten und erneut versuchen.", // Too many attempts. Please wait a minute and try again.
   "login.failed": "Anmeldung fehlgeschlagen, bitte erneut versuchen", // Login failed, please try again
   "login.pairingRequired": "Dieser Server erfordert einen Kopplungslink. Öffnen Sie den im Fernzugriff-Bereich der Desktop-App erzeugten Link.", // This server requires a pairing link
   "login.authFailed": "Falsches Passwort oder der Kopplungslink ist abgelaufen. Bitte verbinden Sie sich mit einem neuen Kopplungslink erneut.", // Wrong password or pairing link expired

@@ -41,19 +41,16 @@ pub fn load(data_dir: &Path) -> Option<PersistedAccess> {
         .filter(|p| !p.pairing_token.trim().is_empty())
 }
 
-/// Atomically save pairing state: write a temp file, restrict it to 0600 on Unix, then rename over the
-/// target so a crash mid-write never leaves a truncated token file.
+/// Atomically save pairing state: write a temp file created owner-only (0600 at open time, so the token
+/// never exists with default umask permissions), then rename over the target so a crash mid-write never
+/// leaves a truncated token file.
 pub fn save(data_dir: &Path, access: &PersistedAccess) -> Result<(), String> {
     let target = path(data_dir);
     let tmp = data_dir.join(format!("{FILENAME}.tmp"));
     let json = serde_json::to_string(access)
         .map_err(|e| format!("failed to serialize remote-access state: {e}"))?;
-    std::fs::write(&tmp, json).map_err(|e| format!("failed to write remote-access state: {e}"))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
-    }
+    super::write_owner_only(&tmp, json.as_bytes())
+        .map_err(|e| format!("failed to write remote-access state: {e}"))?;
     std::fs::rename(&tmp, &target)
         .map_err(|e| format!("failed to persist remote-access state: {e}"))?;
     Ok(())

@@ -771,6 +771,7 @@ const zhCN: typeof en = {
   "login.passwordPlaceholder": "访问密码",
   "login.connect": "连接",
   "login.wrongPassword": "密码错误",
+  "login.rateLimited": "尝试次数过多，请稍等一分钟后重试。", // Too many attempts. Please wait a minute and try again.
   "login.failed": "登录失败，请重试",
   "login.pairingRequired": "此服务要求使用配对链接访问。请用桌面端「远程访问」生成的配对链接打开。",
   "login.authFailed": "密码错误，或配对链接已失效，请用新的配对链接重新连接。",

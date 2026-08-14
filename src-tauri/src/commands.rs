@@ -67,6 +67,8 @@ pub async fn desktop_call(
             &cmd,
             &args,
             crate::pty::manager::DESKTOP_SOURCE,
+            // The desktop shell is the machine owner's own UI: always a local, fully trusted origin.
+            crate::web::dispatch::CallOrigin::Local,
         )
     })
     .await
@@ -405,8 +407,9 @@ pub fn web_devices_list(app: AppHandle) -> Vec<DeviceEntry> {
 }
 
 /// Remove a device registration display entry. Shared links can still reconnect; rotate to revoke all.
+/// Errors when the revocation cannot be persisted (it would silently return after the next restart).
 #[tauri::command]
-pub fn web_device_revoke(app: AppHandle, device_id: String) -> bool {
+pub fn web_device_revoke(app: AppHandle, device_id: String) -> Result<bool, String> {
     crate::command_core::web_device_revoke(&AppCtx::Tauri(app), &device_id)
 }
 

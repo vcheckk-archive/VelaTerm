@@ -814,6 +814,7 @@ const en = {
   "login.passwordPlaceholder": "Access password",
   "login.connect": "Connect",
   "login.wrongPassword": "Wrong password",
+  "login.rateLimited": "Too many attempts. Please wait a minute and try again.",
   "login.failed": "Login failed, please try again",
   "login.pairingRequired": "This server requires a pairing link. Open the pairing link from the desktop app's Remote Access panel.",
   "login.authFailed": "Wrong password, or the pairing link has expired. Please reconnect with a new pairing link.",

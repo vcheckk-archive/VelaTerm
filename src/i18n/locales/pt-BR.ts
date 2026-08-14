@@ -790,6 +790,7 @@ const ptBR: typeof en = {
   "login.passwordPlaceholder": "Senha de acesso", // Access password
   "login.connect": "Conectar", // Connect
   "login.wrongPassword": "Senha incorreta", // Wrong password
+  "login.rateLimited": "Muitas tentativas. Aguarde um minuto e tente novamente.", // Too many attempts. Please wait a minute and try again.
   "login.failed": "Falha no login, tente novamente", // Login failed, please try again
   "login.pairingRequired": "Este servidor requer um link de emparelhamento. Abra o link gerado no painel de Acesso remoto do app de desktop.", // This server requires a pairing link
   "login.authFailed": "Senha incorreta ou o link de emparelhamento expirou. Reconecte-se com um novo link de emparelhamento.", // Wrong password or pairing link expired

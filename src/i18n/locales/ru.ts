@@ -807,6 +807,7 @@ const ru: typeof en = {
   "login.passwordPlaceholder": "Пароль доступа", // Access password
   "login.connect": "Подключиться", // Connect
   "login.wrongPassword": "Неверный пароль", // Wrong password
+  "login.rateLimited": "Слишком много попыток. Подождите минуту и попробуйте снова.", // Too many attempts. Please wait a minute and try again.
   "login.failed": "Не удалось войти, попробуйте ещё раз", // Login failed, please try again
   "login.pairingRequired": "Этот сервер требует ссылку для сопряжения. Откройте ссылку, созданную в панели «Удалённый доступ» настольного приложения.", // This server requires a pairing link
   "login.authFailed": "Неверный пароль или ссылка для сопряжения устарела. Подключитесь снова по новой ссылке.", // Wrong password or pairing link expired

@@ -16,11 +16,70 @@ use crate::git;
 use crate::host::AppCtx;
 use crate::models::{NodeKind, SessionKind};
 
+/// Trust classification of a dispatch call's origin, independent of the `source` connection ID.
+///
+/// The threat-model boundary is "who can reach this transport": the Tauri desktop (`desktop_call`) and
+/// any client of a `LoopbackHttp` instance (the Electron sidecar; reaching loopback implies local shell
+/// access, which the threat model already trusts) are `Local`. Clients of the network-exposed
+/// `LanTls`/`LanHttp` instances are `Remote`, even though they are fully authenticated: a paired device
+/// gets a shell, but not the management plane that could rotate the pairing token, revoke other devices,
+/// or read/rewrite the persisted remote-access credentials.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CallOrigin {
+    Local,
+    Remote,
+}
+
+impl CallOrigin {
+    /// Map a serving mode to the trust origin of its WebSocket clients. String-matching on the `ws-N`
+    /// source ID cannot work here because Electron loopback and remote browsers both connect over WS.
+    pub fn for_serve_mode(mode: super::ServeMode) -> Self {
+        match mode {
+            super::ServeMode::LoopbackHttp => CallOrigin::Local,
+            super::ServeMode::LanTls | super::ServeMode::LanHttp => CallOrigin::Remote,
+        }
+    }
+}
+
+/// Management-plane commands gated to local origins: they control the remote-access service itself
+/// (start/stop/restart with a new password, pairing-token rotation, device revocation) or leak host
+/// topology (ports, URLs, fingerprint, interfaces). No remote UI calls them — the remote-access panel
+/// and its status polling are desktop/Electron-only — so gating is regression-free by construction.
+const MANAGEMENT_CMDS: &[&str] = &[
+    "web_server_start",
+    "web_server_stop",
+    "web_server_status",
+    "web_pairing_create",
+    "web_devices_list",
+    "web_device_revoke",
+    "network_interfaces_list",
+];
+
+/// Whether an app-settings key is security-relevant and therefore hidden from and unwritable by remote
+/// clients: the `remoteAccess.*` namespace carries the Argon2id password verifier (an offline-bruteforce
+/// target) and the autostart port/enabled keys the next restart trusts; `gitea.token` is a plaintext
+/// credential fallback when no keyring is available.
+fn is_protected_setting(key: &str) -> bool {
+    key.starts_with("remoteAccess.") || key == "gitea.token"
+}
+
 /// Dispatch one command and return a JSON value ready for frontend serialization.
 ///
 /// `source` identifies the originating WebSocket connection for PTY resize-owner arbitration. Desktop
-/// commands always use desktop, and input no longer participates in arbitration.
-pub fn dispatch(app: &AppCtx, cmd: &str, args: &Value, source: &str) -> Result<Value, String> {
+/// commands always use desktop, and input no longer participates in arbitration. `origin` classifies the
+/// caller's trust (see [`CallOrigin`]) and gates the management plane and protected settings keys.
+pub fn dispatch(
+    app: &AppCtx,
+    cmd: &str,
+    args: &Value,
+    source: &str,
+    origin: CallOrigin,
+) -> Result<Value, String> {
+    // Gate the management plane before any argument parsing: remote paired devices are trusted with a
+    // shell (threat model), but not with rotating/revoking the credentials that admit other devices.
+    if origin == CallOrigin::Remote && MANAGEMENT_CMDS.contains(&cmd) {
+        return Err(format!("Command not available to remote clients: {cmd}"));
+    }
     match cmd {
         // ── PTY control (`pty_spawn` is handled in ws.rs) ──
         "pty_write" => {
@@ -232,7 +291,15 @@ pub fn dispatch(app: &AppCtx, cmd: &str, args: &Value, source: &str) -> Result<V
             Ok(Value::Null)
         }
         // Cross-shell application preferences: Electron reads and writes shared app_settings via sidecar.
-        "get_app_settings" => to_value(core::get_app_settings(app)?),
+        // Remote clients receive the map without security-relevant keys (password verifier, autostart
+        // config, plaintext token fallback); local desktop/Electron callers keep the full map.
+        "get_app_settings" => {
+            let mut settings = core::get_app_settings(app)?;
+            if origin == CallOrigin::Remote {
+                settings.retain(|k, _| !is_protected_setting(k));
+            }
+            to_value(settings)
+        }
         // Remote and Electron clients compare backend CARGO_PKG_VERSION with __APP_VERSION__ at startup
         // and report frontend/backend build drift. This shares Tauri's app_version source.
         "app_version" => to_value(env!("CARGO_PKG_VERSION")),
@@ -244,6 +311,13 @@ pub fn dispatch(app: &AppCtx, cmd: &str, args: &Value, source: &str) -> Result<V
                         .ok()
                 })
                 .unwrap_or_default();
+            // Reject the whole batch instead of silently dropping protected keys: a silent drop would
+            // fake success while the write never happened, hiding the ACL from legitimate tooling.
+            if origin == CallOrigin::Remote {
+                if let Some(key) = entries.keys().find(|k| is_protected_setting(k)) {
+                    return Err(format!("Settings key not writable by remote clients: {key}"));
+                }
+            }
             core::set_app_settings(app, entries)?;
             Ok(Value::Null)
         }
@@ -462,7 +536,7 @@ pub fn dispatch(app: &AppCtx, cmd: &str, args: &Value, source: &str) -> Result<V
         "web_device_revoke" => Ok(Value::Bool(core::web_device_revoke(
             app,
             &req_str(args, "deviceId")?,
-        ))),
+        )?)),
 
         "spawn_skills_installed" => Ok(Value::Bool(crate::agent::spawn_cli::skills_installed())),
         "install_spawn_skills" => {
@@ -553,7 +627,7 @@ fn req_kind<T: serde::de::DeserializeOwned>(args: &Value, key: &str) -> Result<T
 
 #[cfg(test)]
 mod tests {
-    use super::dispatch;
+    use super::{dispatch, CallOrigin, MANAGEMENT_CMDS};
     use crate::host::{AppCtx, HeadlessHost};
     use crate::pty::manager::DESKTOP_SOURCE;
     use serde_json::{json, Value};
@@ -583,17 +657,18 @@ mod tests {
             "web_pairing_create",
             &json!({ "address": null, "rotate": false }),
             DESKTOP_SOURCE,
+            CallOrigin::Local,
         )
         .unwrap_err();
         assert_eq!(err, "Web server not started");
 
         // The arm tolerates omitted keys (address defaults to None, rotate to false); a bare WS
         // client sending an empty args object must reach core the same way.
-        let err = dispatch(&app, "web_pairing_create", &json!({}), DESKTOP_SOURCE).unwrap_err();
+        let err = dispatch(&app, "web_pairing_create", &json!({}), DESKTOP_SOURCE, CallOrigin::Local).unwrap_err();
         assert_eq!(err, "Web server not started");
 
         // Device listing returns an empty list while stopped, like the Tauri command does.
-        let devices = dispatch(&app, "web_devices_list", &json!({}), DESKTOP_SOURCE).unwrap();
+        let devices = dispatch(&app, "web_devices_list", &json!({}), DESKTOP_SOURCE, CallOrigin::Local).unwrap();
         assert_eq!(devices, json!([]));
 
         // Revocation returns false while stopped; the camelCase key matches webServer.ts.
@@ -602,6 +677,7 @@ mod tests {
             "web_device_revoke",
             &json!({ "deviceId": "dev-a" }),
             DESKTOP_SOURCE,
+            CallOrigin::Local,
         )
         .unwrap();
         assert_eq!(revoked, Value::Bool(false));
@@ -641,6 +717,7 @@ mod tests {
             "web_pairing_create",
             &json!({ "address": "127.0.0.1", "rotate": false }),
             DESKTOP_SOURCE,
+            CallOrigin::Local,
         )
         .expect("pairing creation failed on a running server");
         let url = first["url"].as_str().expect("url missing from PairingInfo");
@@ -659,6 +736,7 @@ mod tests {
             "web_pairing_create",
             &json!({ "address": "127.0.0.1", "rotate": true }),
             DESKTOP_SOURCE,
+            CallOrigin::Local,
         )
         .expect("pairing rotation failed on a running server");
         let rotated_token = rotated["deviceToken"]
@@ -676,7 +754,7 @@ mod tests {
     #[test]
     fn network_interfaces_list_is_dispatched_with_shape() {
         let app = test_ctx();
-        let result = dispatch(&app, "network_interfaces_list", &json!({}), DESKTOP_SOURCE)
+        let result = dispatch(&app, "network_interfaces_list", &json!({}), DESKTOP_SOURCE, CallOrigin::Local)
             .expect("network_interfaces_list must be routed, not an unknown command");
         let list = result.as_array().expect("expected a JSON array");
         // Ordering contract of iface_candidates: broadcast-capable LAN interfaces come first, so once
@@ -729,6 +807,7 @@ mod tests {
             "web_pairing_create",
             &json!({ "address": "100.100.5.5", "rotate": false }),
             DESKTOP_SOURCE,
+            CallOrigin::Local,
         )
         .expect("pairing creation failed on a running server");
         let url = info["url"].as_str().expect("url missing from PairingInfo");
@@ -745,7 +824,140 @@ mod tests {
     #[test]
     fn device_revoke_requires_device_id() {
         let app = test_ctx();
-        let err = dispatch(&app, "web_device_revoke", &json!({}), DESKTOP_SOURCE).unwrap_err();
+        let err = dispatch(&app, "web_device_revoke", &json!({}), DESKTOP_SOURCE, CallOrigin::Local).unwrap_err();
         assert_eq!(err, "Missing string parameter deviceId");
+    }
+
+    /// Every management-plane command is rejected for remote origins before any argument parsing or core
+    /// work — even with valid arguments — while the same calls keep working for local origins (see the
+    /// pairing tests above, which all run with CallOrigin::Local and cover the desktop_call path).
+    #[test]
+    fn management_commands_are_gated_for_remote_origin() {
+        let app = test_ctx();
+        // Valid-looking args per command prove the gate fires before extraction, not on missing params.
+        let args = json!({
+            "password": "pw", "deviceId": "dev-a", "address": "127.0.0.1", "rotate": true
+        });
+        // Pin the gated set literally: iterating over the production constant alone would stay green if a
+        // command were removed from MANAGEMENT_CMDS, silently un-gating it. The acceptance criterion names
+        // these commands, so shrinking the set must fail HERE first.
+        const EXPECTED_GATED: &[&str] = &[
+            "web_server_start",
+            "web_server_stop",
+            "web_server_status",
+            "web_pairing_create",
+            "web_devices_list",
+            "web_device_revoke",
+            "network_interfaces_list",
+        ];
+        assert_eq!(
+            MANAGEMENT_CMDS, EXPECTED_GATED,
+            "MANAGEMENT_CMDS changed: removing a command un-gates it for remote clients — update this \
+             pinned list only together with a deliberate security review"
+        );
+        for cmd in EXPECTED_GATED {
+            let err = dispatch(&app, cmd, &args, "ws-1", CallOrigin::Remote).unwrap_err();
+            assert_eq!(
+                err,
+                format!("Command not available to remote clients: {cmd}"),
+                "{cmd} must be gated for remote origins"
+            );
+        }
+    }
+
+    /// The serve-mode → origin mapping: Electron's loopback sidecar stays Local (reaching 127.0.0.1
+    /// implies local shell access), while both network-exposed modes are Remote. Together with the
+    /// gating/ACL tests this covers the Electron-loopback lane compositionally.
+    #[test]
+    fn call_origin_for_serve_mode() {
+        use crate::web::ServeMode;
+        assert_eq!(CallOrigin::for_serve_mode(ServeMode::LoopbackHttp), CallOrigin::Local);
+        assert_eq!(CallOrigin::for_serve_mode(ServeMode::LanTls), CallOrigin::Remote);
+        assert_eq!(CallOrigin::for_serve_mode(ServeMode::LanHttp), CallOrigin::Remote);
+    }
+
+    /// get_app_settings hides the security-relevant keys (remoteAccess.* verifier/autostart config and
+    /// the plaintext gitea.token fallback) from remote clients while local callers keep the full map.
+    #[test]
+    fn get_app_settings_filters_protected_keys_for_remote() {
+        let app = test_ctx();
+        crate::command_core::set_app_settings(
+            &app,
+            std::collections::HashMap::from([
+                ("remoteAccess.passwordHash".to_string(), "$argon2id$fake".to_string()),
+                ("remoteAccess.port".to_string(), "9123".to_string()),
+                ("gitea.token".to_string(), "secret-token".to_string()),
+                ("vlx-theme".to_string(), "dark".to_string()),
+            ]),
+        )
+        .unwrap();
+
+        let remote = dispatch(&app, "get_app_settings", &json!({}), "ws-1", CallOrigin::Remote)
+            .expect("remote settings read must succeed, just filtered");
+        assert_eq!(remote["vlx-theme"], "dark");
+        assert!(remote.get("remoteAccess.passwordHash").is_none());
+        assert!(remote.get("remoteAccess.port").is_none());
+        assert!(remote.get("gitea.token").is_none());
+
+        let local = dispatch(&app, "get_app_settings", &json!({}), DESKTOP_SOURCE, CallOrigin::Local)
+            .expect("local settings read must stay unfiltered");
+        assert_eq!(local["remoteAccess.passwordHash"], "$argon2id$fake");
+        assert_eq!(local["gitea.token"], "secret-token");
+        assert_eq!(local["vlx-theme"], "dark");
+    }
+
+    /// set_app_settings rejects a remote batch containing any protected key — and the database stays
+    /// untouched, including the unprotected keys of the same batch — while plain remote writes and local
+    /// writes of protected keys keep working.
+    #[test]
+    fn set_app_settings_rejects_protected_keys_for_remote() {
+        let app = test_ctx();
+
+        // A remote batch mixing a protected key is rejected as a whole.
+        let err = dispatch(
+            &app,
+            "set_app_settings",
+            &json!({ "entries": { "remoteAccess.port": "1", "vlx-theme": "dark" } }),
+            "ws-1",
+            CallOrigin::Remote,
+        )
+        .unwrap_err();
+        assert_eq!(err, "Settings key not writable by remote clients: remoteAccess.port");
+        let settings = crate::command_core::get_app_settings(&app).unwrap();
+        assert!(settings.get("remoteAccess.port").is_none(), "rejected write must not persist");
+        assert!(settings.get("vlx-theme").is_none(), "a rejected batch must persist nothing");
+
+        // gitea.token is protected by exact key.
+        let err = dispatch(
+            &app,
+            "set_app_settings",
+            &json!({ "entries": { "gitea.token": "x" } }),
+            "ws-1",
+            CallOrigin::Remote,
+        )
+        .unwrap_err();
+        assert_eq!(err, "Settings key not writable by remote clients: gitea.token");
+
+        // Unprotected remote writes still work.
+        dispatch(
+            &app,
+            "set_app_settings",
+            &json!({ "entries": { "vlx-theme": "light" } }),
+            "ws-1",
+            CallOrigin::Remote,
+        )
+        .expect("remote write of unprotected keys must succeed");
+        // Local callers may write protected keys (the desktop panel persists the remote-access config).
+        dispatch(
+            &app,
+            "set_app_settings",
+            &json!({ "entries": { "remoteAccess.port": "9123" } }),
+            DESKTOP_SOURCE,
+            CallOrigin::Local,
+        )
+        .expect("local write of protected keys must succeed");
+        let settings = crate::command_core::get_app_settings(&app).unwrap();
+        assert_eq!(settings.get("vlx-theme").map(String::as_str), Some("light"));
+        assert_eq!(settings.get("remoteAccess.port").map(String::as_str), Some("9123"));
     }
 }

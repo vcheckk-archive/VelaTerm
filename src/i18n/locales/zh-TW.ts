@@ -772,6 +772,7 @@ const zhTW: typeof en = {
   "login.passwordPlaceholder": "存取密碼", // Access password
   "login.connect": "連線", // Connect
   "login.wrongPassword": "密碼錯誤", // Wrong password
+  "login.rateLimited": "嘗試次數過多，請稍候一分鐘後再試。", // Too many attempts. Please wait a minute and try again.
   "login.failed": "登入失敗，請重試", // Login failed, please try again
   "login.pairingRequired": "此服務要求使用配對連結存取。請用桌面端「遠端存取」產生的配對連結開啟。", // This server requires a pairing link
   "login.authFailed": "密碼錯誤，或配對連結已失效，請用新的配對連結重新連線。", // Wrong password or pairing link expired
