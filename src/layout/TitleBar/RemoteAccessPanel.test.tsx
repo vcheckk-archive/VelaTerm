@@ -1,9 +1,12 @@
-//! Coverage for the advertised-IP selector: choosing an IP persists it and regenerates the pairing
+//! Coverage for the advertised-IP selector (choosing an IP persists it and regenerates the pairing
 //! link with exactly that address, a vanished persisted IP falls back to automatic, and the URL
-//! ordering helper matches hosts exactly instead of by substring.
+//! ordering helper matches hosts exactly) and for restart persistence (the port field prefills the
+//! last persisted port instead of the hardcoded 8799, and a failed auto-start surfaces its error).
 
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+
+import type { WebServerStatus } from "../../ipc/webServer";
 
 const {
   invokeMock,
@@ -30,6 +33,7 @@ const {
 });
 
 vi.mock("../../i18n", () => ({
+  // Echo keys so assertions are locale-independent.
   useT: () => (key: string) => key,
 }));
 vi.mock("../../ipc/transport", () => ({ invoke: invokeMock }));
@@ -69,6 +73,21 @@ function runningStatus() {
   };
 }
 
+/** Stopped-service status with the given persisted extras. */
+function stoppedStatus(extra: Partial<WebServerStatus>): WebServerStatus {
+  return {
+    running: false,
+    port: null,
+    url: null,
+    urls: [],
+    fingerprint: null,
+    autostartError: null,
+    savedPort: null,
+    autoStart: false,
+    ...extra,
+  };
+}
+
 function mockDefaults() {
   webServerStatusMock.mockResolvedValue(runningStatus());
   networkInterfacesListMock.mockResolvedValue([
@@ -81,6 +100,13 @@ function mockDefaults() {
       deviceToken: "device-token",
     }),
   );
+}
+
+/** Mocks for the stopped-panel tests: no interfaces needed, pairing never auto-triggers. */
+function mockStopped(extra: Partial<WebServerStatus>) {
+  webServerStatusMock.mockResolvedValue(stoppedStatus(extra));
+  networkInterfacesListMock.mockResolvedValue([]);
+  webPairingCreateMock.mockResolvedValue({ url: "https://x/#pair=abc", deviceToken: "t" });
 }
 
 afterEach(() => {
@@ -207,5 +233,35 @@ describe("orderUrlsBySelectedIp", () => {
       "https://10.0.0.1:8799",
       "https://10.0.0.11:8799",
     ]);
+  });
+});
+
+describe("RemoteAccessPanel restart persistence", () => {
+  it("prefills the port field with the persisted savedPort instead of 8799", async () => {
+    mockStopped({ savedPort: 9123 });
+    render(<RemoteAccessPanel onClose={() => {}} />);
+    await waitFor(() => {
+      const input = screen.getByPlaceholderText("8799") as HTMLInputElement;
+      expect(input.value).toBe("9123");
+    });
+  });
+
+  it("keeps the 8799 default when no port was persisted", async () => {
+    mockStopped({});
+    render(<RemoteAccessPanel onClose={() => {}} />);
+    await waitFor(() => {
+      const input = screen.getByPlaceholderText("8799") as HTMLInputElement;
+      expect(input.value).toBe("8799");
+    });
+  });
+
+  it("shows the auto-start error reported by the backend", async () => {
+    mockStopped({ autostartError: "Port 9123 is already in use" });
+    render(<RemoteAccessPanel onClose={() => {}} />);
+    await waitFor(() => {
+      expect(
+        screen.getByText(/remote\.autostartFailed Port 9123 is already in use/),
+      ).toBeTruthy();
+    });
   });
 });

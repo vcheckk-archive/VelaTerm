@@ -302,6 +302,9 @@ const es: typeof en = {
   "remote.deviceBlockHint":
     "Los dispositivos bloqueados se desconectan y no pueden volver a conectarse (necesitan un nuevo enlace de emparejamiento). Los demás dispositivos no se ven afectados.", // Block hint
   "remote.devicesEmpty": "No hay dispositivos emparejados", // No paired devices yet
+  "remote.autoRestartHint":
+    "El acceso remoto se reinicia automáticamente al volver a abrir la aplicación. «Detener servidor» lo desactiva.", // Remote access restarts automatically when the app is reopened. Stop Server turns this off.
+  "remote.autostartFailed": "Error en el inicio automático:", // Automatic start failed:
 
   // ── Remote connection panel ──
   "connect.title": "Conectar a servidor remoto", // Connect to Remote Server

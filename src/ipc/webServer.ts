@@ -12,6 +12,12 @@ export interface WebServerStatus {
   urls: string[];
   /** Server self-signed certificate SHA-256 fingerprint (uppercase colon-separated hexadecimal) for verification; null when stopped. */
   fingerprint: string | null;
+  /** Error message of the most recent failed auto-start (e.g. port in use); null after any successful start. */
+  autostartError: string | null;
+  /** Last persisted port from app settings, used to prefill the port field after a restart. */
+  savedPort: number | null;
+  /** Whether the persisted enabled flag will auto-start the service on the next launch. */
+  autoStart: boolean;
 }
 
 /**

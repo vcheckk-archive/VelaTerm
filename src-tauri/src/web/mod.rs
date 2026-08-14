@@ -8,6 +8,7 @@
 //! - `rust-embed` bundles `../dist` for offline release use.
 //! - `/ws` multiplexes invokes, events, and PTY traffic (see `ws`).
 
+mod access_store;
 mod auth;
 // desktop_call also uses dispatch, so expose it within the crate rather than keeping it private to web transport.
 pub(crate) mod dispatch;
@@ -62,6 +63,12 @@ pub struct WebServerStatus {
     pub urls: Vec<String>,
     /// Colon-separated uppercase SHA-256 fingerprint of the self-signed certificate for host verification; None when stopped.
     pub fingerprint: Option<String>,
+    /// Error message of the most recent failed auto-start (e.g. port in use); cleared by any successful start.
+    pub autostart_error: Option<String>,
+    /// Last persisted port from app settings, used by the panel to prefill the port field; filled in command_core.
+    pub saved_port: Option<u16>,
+    /// Whether the persisted enabled flag would auto-start the service on next launch; filled in command_core.
+    pub auto_start: bool,
 }
 
 impl WebServerStatus {
@@ -72,6 +79,9 @@ impl WebServerStatus {
             url: None,
             urls: Vec::new(),
             fingerprint: None,
+            autostart_error: None,
+            saved_port: None,
+            auto_start: false,
         }
     }
 }
@@ -145,17 +155,37 @@ pub struct PairingInfo {
 
 /// Public device-entry alias used by commands.rs return types.
 pub use auth::DeviceEntry;
+/// Argon2id PHC hashing, re-exported so command_core can persist the verifier it passes back on auto-start.
+pub use auth::hash_password;
+
+/// Password material for [`WebServer::start`].
+pub enum StartAuth {
+    /// Plaintext password from an interactive caller or the `--serve` CLI; hashed internally.
+    Password(String),
+    /// Persisted Argon2id PHC verifier string used by auto-start, where no plaintext exists anymore.
+    PasswordHash(String),
+}
 
 /// Tauri-managed web-service state holding the running handle behind a Mutex for start/stop transitions.
+/// The pairing token, device registry, and blocklist persist in the data directory (`access_store`), so a
+/// restart no longer invalidates pairing links; only explicit rotation does.
 pub struct WebServer {
     inner: Mutex<Option<Running>>,
+    /// Message of the most recent failed auto-start, surfaced through status(); cleared by a successful start.
+    autostart_error: Mutex<Option<String>>,
 }
 
 impl WebServer {
     pub fn new() -> Self {
         Self {
             inner: Mutex::new(None),
+            autostart_error: Mutex::new(None),
         }
+    }
+
+    /// Record or clear the auto-start failure shown in the remote-access panel.
+    pub fn set_autostart_error(&self, msg: Option<String>) {
+        *self.autostart_error.lock().unwrap() = msg;
     }
 
     /// Starts the service, first stopping any running instance so password, port, and mode changes apply.
@@ -168,13 +198,25 @@ impl WebServer {
     pub fn start(
         &self,
         app: AppCtx,
-        password: &str,
+        auth: StartAuth,
         port: Option<u16>,
         mode: ServeMode,
     ) -> Result<WebServerStatus, String> {
-        if password.trim().is_empty() {
-            return Err("Please set an access password first".into());
-        }
+        // Normalize both variants to an Argon2id PHC verifier; plaintext never outlives this scope.
+        let verifier_phc = match auth {
+            StartAuth::Password(pw) => {
+                if pw.trim().is_empty() {
+                    return Err("Please set an access password first".into());
+                }
+                auth::hash_password(&pw)?
+            }
+            StartAuth::PasswordHash(phc) => {
+                if phc.trim().is_empty() {
+                    return Err("Please set an access password first".into());
+                }
+                phc
+            }
+        };
         let mut guard = self.inner.lock().unwrap();
         if let Some(running) = guard.take() {
             running.handle.shutdown();
@@ -205,9 +247,10 @@ impl WebServer {
             tls_pem = Some((cert_pem, key_pem));
         }
 
-        // Remove the obsolete per-device-token registry, replaced by one rotation token and an in-memory registry.
+        // Remove the obsolete per-device-token registry, replaced by one rotation token and the persisted
+        // pairing state in access_store.
         let _ = std::fs::remove_file(data_dir.join("vlx-devices.json"));
-        let auth = Arc::new(AuthState::new(password));
+        let auth = Arc::new(AuthState::load_or_create(&verifier_phc, &data_dir));
         let ctx = Ctx {
             app,
             auth: auth.clone(),
@@ -289,6 +332,9 @@ impl WebServer {
             thread,
         });
 
+        // Any successful start supersedes a previous auto-start failure.
+        self.set_autostart_error(None);
+
         Ok(status_from(port, lan_ips, fingerprint, mode))
     }
 
@@ -300,12 +346,14 @@ impl WebServer {
         }
     }
 
-    /// Returns current status.
+    /// Returns current status, including the last auto-start failure for the panel.
     pub fn status(&self) -> WebServerStatus {
-        match &*self.inner.lock().unwrap() {
+        let mut status = match &*self.inner.lock().unwrap() {
             Some(r) => status_from(r.port, r.lan_ips.clone(), r.fingerprint.clone(), r.mode),
             None => WebServerStatus::stopped(),
-        }
+        };
+        status.autostart_error = self.autostart_error.lock().unwrap().clone();
+        status
     }
 
     /// Generates a browser pairing URL containing the current shared token and server public key. `address` chooses
@@ -403,6 +451,9 @@ fn status_from(
         url: urls.first().cloned(),
         urls,
         fingerprint,
+        autostart_error: None,
+        saved_port: None,
+        auto_start: false,
     }
 }
 
@@ -587,8 +638,70 @@ fn is_network_or_broadcast(ip: std::net::Ipv4Addr, netmask: std::net::Ipv4Addr) 
 
 #[cfg(test)]
 mod tests {
-    use super::{is_cgnat, is_network_or_broadcast, is_production_identifier, is_virtual_iface};
+    use super::{
+        hash_password, is_cgnat, is_network_or_broadcast, is_production_identifier,
+        is_virtual_iface, ServeMode, StartAuth, WebServer,
+    };
     use std::net::Ipv4Addr;
+
+    /// Find a free port by binding zero then releasing it; the small race is acceptable in tests.
+    fn free_port() -> u16 {
+        let l = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        l.local_addr().unwrap().port()
+    }
+
+    /// Restarting the service against the same data dir keeps the pairing token, and a persisted PHC
+    /// verifier (the auto-start path) still accepts the original password. Loopback-only; the server is
+    /// stopped immediately (never bind 0.0.0.0 in tests).
+    #[test]
+    fn pairing_token_survives_restart_and_hash_start_verifies_password() {
+        let tmp = std::env::temp_dir().join(format!("vlx-web-restart-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let db = crate::db::Db::open(&tmp.join("t.db")).unwrap();
+        let host = std::sync::Arc::new(crate::host::HeadlessHost::new(tmp.clone(), db));
+        let ctx = crate::host::AppCtx::Headless(host);
+
+        let port = free_port();
+        let web = WebServer::new();
+        web.start(
+            ctx.clone(),
+            StartAuth::Password("pw".into()),
+            Some(port),
+            ServeMode::LoopbackHttp,
+        )
+        .expect("first start should succeed");
+        let token1 = web.create_pairing(None, false).unwrap().device_token;
+        web.stop();
+
+        // "Restart": a fresh WebServer started from a persisted Argon2id hash, as auto-start does.
+        let phc = hash_password("pw").unwrap();
+        let web2 = WebServer::new();
+        // A stale auto-start error must be cleared by a successful start (panel shows current truth).
+        web2.set_autostart_error(Some("stale error".into()));
+        web2.start(
+            ctx,
+            StartAuth::PasswordHash(phc),
+            Some(port),
+            ServeMode::LoopbackHttp,
+        )
+        .expect("restart from persisted hash should succeed");
+        assert!(
+            web2.status().autostart_error.is_none(),
+            "a successful start must clear a stale autostart error"
+        );
+        let token2 = web2.create_pairing(None, false).unwrap().device_token;
+        assert_eq!(token1, token2, "pairing token must survive a restart");
+
+        // The persisted verifier still accepts the original password (second factor of the handshake).
+        {
+            let guard = web2.inner.lock().unwrap();
+            let running = guard.as_ref().unwrap();
+            assert!(running.auth.verify_password("pw"));
+            assert!(!running.auth.verify_password("wrong"));
+        }
+        web2.stop();
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 
     #[test]
     fn release_identifier_is_production() {

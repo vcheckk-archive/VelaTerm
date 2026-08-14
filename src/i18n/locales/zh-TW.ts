@@ -298,6 +298,9 @@ const zhTW: typeof en = {
   "remote.deviceBlockHint":
     "被禁裝置會被中斷且無法重連（需重新用配對連結），其他裝置不受影響。", // Block hint
   "remote.devicesEmpty": "尚無已配對裝置", // No paired devices yet
+  "remote.autoRestartHint":
+    "重新開啟應用程式時遠端存取會自動恢復，「停止伺服器」可關閉此功能。", // Remote access restarts automatically when the app is reopened. Stop Server turns this off.
+  "remote.autostartFailed": "自動啟動失敗：", // Automatic start failed:
 
   // ── Remote connection panel ──
   "connect.title": "連線到遠端服務", // Connect to Remote Server

@@ -626,7 +626,7 @@ mod tests {
                 .port();
             started = app.remote_web().start(
                 app.clone(),
-                "test-pw",
+                crate::web::StartAuth::Password("test-pw".into()),
                 Some(port),
                 crate::web::ServeMode::LoopbackHttp,
             );
@@ -714,7 +714,7 @@ mod tests {
                 .port();
             started = app.remote_web().start(
                 app.clone(),
-                "test-pw",
+                crate::web::StartAuth::Password("test-pw".into()),
                 Some(port),
                 crate::web::ServeMode::LoopbackHttp,
             );
