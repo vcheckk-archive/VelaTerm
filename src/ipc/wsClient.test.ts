@@ -84,10 +84,19 @@ describe("wsClient E2EE handshake failure wiring", () => {
     setupHandshake();
     const reasons: Array<string | undefined> = [];
     const unsubscribe = wsClient.onAuthLost((reason) => reasons.push(reason));
-    // Valid base64, but random bytes that no key decrypts (decryptText returns null). Note: an
-    // INVALID-base64 frame would make onMessage throw from atob in b64ToBytes — a pre-existing
-    // robustness gap reported separately, deliberately not pinned here.
+    // Valid base64, but random bytes that no key decrypts (decryptText returns null).
     internals.onMessage({ data: bytesToB64(nacl.randomBytes(64)) });
+    unsubscribe();
+    expect(reasons).toEqual([undefined]);
+  });
+
+  it("treats a handshake frame with INVALID base64 as a failed handshake instead of throwing", () => {
+    setupHandshake();
+    const reasons: Array<string | undefined> = [];
+    const unsubscribe = wsClient.onAuthLost((reason) => reasons.push(reason));
+    // atob throws on this input; decryptText must catch it and degrade to the null path, which the
+    // handshake handler maps to failHandshake — never an uncaught exception out of onMessage.
+    expect(() => internals.onMessage({ data: "%%%not-base64%%%" })).not.toThrow();
     unsubscribe();
     expect(reasons).toEqual([undefined]);
   });

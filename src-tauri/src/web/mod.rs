@@ -74,6 +74,10 @@ pub struct WebServerStatus {
     pub saved_port: Option<u16>,
     /// Whether the persisted enabled flag would auto-start the service on next launch; filled in command_core.
     pub auto_start: bool,
+    /// URL scheme of the running service ("https" for LanTls, "http" for the plaintext modes); None when
+    /// stopped. Explicit so the frontend can synthesize a URL for an interface that appeared after start
+    /// (absent from the `urls` snapshot) without guessing the scheme from the snapshot's first entry.
+    pub scheme: Option<String>,
 }
 
 impl WebServerStatus {
@@ -87,6 +91,7 @@ impl WebServerStatus {
             autostart_error: None,
             saved_port: None,
             auto_start: false,
+            scheme: None,
         }
     }
 }
@@ -255,7 +260,7 @@ impl WebServer {
         // Remove the obsolete per-device-token registry, replaced by one rotation token and the persisted
         // pairing state in access_store.
         let _ = std::fs::remove_file(data_dir.join("vlx-devices.json"));
-        let auth = Arc::new(AuthState::load_or_create(&verifier_phc, &data_dir));
+        let auth = Arc::new(AuthState::load_or_create(&verifier_phc, &data_dir)?);
         let ctx = Ctx {
             app,
             auth: auth.clone(),
@@ -434,16 +439,18 @@ fn status_from(
     fingerprint: Option<String>,
     mode: ServeMode,
 ) -> WebServerStatus {
+    // The single scheme of this serve mode, reported explicitly in the status so the frontend never
+    // has to infer it from the URL snapshot.
+    let scheme = if matches!(mode, ServeMode::LanTls) {
+        "https"
+    } else {
+        "http"
+    };
     let urls: Vec<String> = match mode {
         // Loopback plaintext exposes only 127.0.0.1 for Electron sidecar.
         ServeMode::LoopbackHttp => vec![format!("http://127.0.0.1:{port}")],
         // LAN modes enumerate LAN addresses and choose HTTP for mobile or HTTPS for browser remote access.
         ServeMode::LanHttp | ServeMode::LanTls => {
-            let scheme = if matches!(mode, ServeMode::LanTls) {
-                "https"
-            } else {
-                "http"
-            };
             // Fall back to localhost when no LAN IP is found, preserving local access.
             let hosts = if lan_ips.is_empty() {
                 vec!["localhost".to_string()]
@@ -465,6 +472,7 @@ fn status_from(
         autostart_error: None,
         saved_port: None,
         auto_start: false,
+        scheme: Some(scheme.to_string()),
     }
 }
 
@@ -697,10 +705,16 @@ mod tests {
 
     /// Restarting the service against the same data dir keeps the pairing token, and a persisted PHC
     /// verifier (the auto-start path) still accepts the original password. Loopback-only; the server is
-    /// stopped immediately (never bind 0.0.0.0 in tests).
+    /// stopped immediately (never bind 0.0.0.0 in tests). Since the in-process PAIRING_STORES registry
+    /// shares live pairing state, the first server AND its references are dropped and the registry is
+    /// asserted empty before the restart — proving the token really reloads from the FILE.
     #[test]
     fn pairing_token_survives_restart_and_hash_start_verifies_password() {
-        let tmp = std::env::temp_dir().join(format!("vlx-web-restart-{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!(
+            "vlx-web-restart-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
         std::fs::create_dir_all(&tmp).unwrap();
         let db = crate::db::Db::open(&tmp.join("t.db")).unwrap();
         let host = std::sync::Arc::new(crate::host::HeadlessHost::new(tmp.clone(), db));
@@ -717,6 +731,14 @@ mod tests {
         .expect("first start should succeed");
         let token1 = web.create_pairing(None, false).unwrap().device_token;
         web.stop();
+        // Drop every reference to the first server's pairing state. stop() joins the server thread,
+        // so its Ctx clones are gone; dropping the WebServer releases the Running handle's AuthState.
+        drop(web);
+        assert!(
+            !super::auth::pairing_store_alive(&tmp),
+            "the shared in-process pairing store must be dead before the restart, otherwise this \
+             test would prove shared-state reuse instead of the file reload it claims"
+        );
 
         // "Restart": a fresh WebServer started from a persisted Argon2id hash, as auto-start does.
         let phc = hash_password("pw").unwrap();
@@ -854,6 +876,18 @@ mod tests {
         assert_eq!(mode & 0o777, 0o600);
         assert_eq!(std::fs::read(&path).unwrap(), b"rotated");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The status carries the serve mode's scheme explicitly (FIX for the frontend's proxy inference
+    /// from the first snapshot URL): https only for LanTls, http for both plaintext modes, None stopped.
+    #[test]
+    fn status_reports_the_explicit_scheme_per_mode() {
+        use super::{status_from, WebServerStatus};
+        let s = |mode| status_from(8799, vec![], None, mode);
+        assert_eq!(s(ServeMode::LanTls).scheme.as_deref(), Some("https"));
+        assert_eq!(s(ServeMode::LanHttp).scheme.as_deref(), Some("http"));
+        assert_eq!(s(ServeMode::LoopbackHttp).scheme.as_deref(), Some("http"));
+        assert!(WebServerStatus::stopped().scheme.is_none());
     }
 
     #[test]

@@ -18,6 +18,9 @@ export interface WebServerStatus {
   savedPort: number | null;
   /** Whether the persisted enabled flag will auto-start the service on the next launch. */
   autoStart: boolean;
+  /** URL scheme of the running service ("https" for LAN TLS, "http" for the plaintext modes); null when
+   * stopped. Explicit so URL synthesis for late-appearing interfaces never guesses from the URL list. */
+  scheme: string | null;
 }
 
 /**

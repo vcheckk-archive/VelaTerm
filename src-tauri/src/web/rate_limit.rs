@@ -11,6 +11,9 @@
 //!   the `PAIRING_STORES` pattern from auth.rs), so a dual-instance `--serve` setup no longer doubles an
 //!   attacker's budget. [`allow`](LoginRateLimiter::allow) *reserves* an attempt atomically, so N
 //!   parallel requests from one IP cannot slip under the limit before any of them records a failure.
+//!   The reservation is an RAII [`AttemptGuard`]: dropping it without an explicit outcome (a client
+//!   disconnecting mid-verify cancels the request future) releases the slot immediately instead of
+//!   leaking it until the window prune.
 //! - [`VERIFY_SEMAPHORE`]: a process-wide cap on concurrent Argon2 verifications, combined with
 //!   `spawn_blocking` in `AuthState::verify_password_async` so the async executor is never blocked.
 
@@ -45,7 +48,7 @@ struct WindowEntry {
     /// Attempts reserved by [`LoginRateLimiter::allow`] whose outcome is still pending. Counted
     /// against the limit so parallel requests from one IP cannot all pass the check before the
     /// first failure is recorded (TOCTOU). A failure converts a reservation into a failure; a
-    /// success removes the whole entry.
+    /// success or a dropped [`AttemptGuard`] releases only its own reservation.
     pending: u32,
 }
 
@@ -82,22 +85,35 @@ impl LoginRateLimiter {
         limiter
     }
 
-    /// Whether this IP may attempt a login now. A `true` result **reserves** one attempt against the
-    /// window immediately, so it must be paired with exactly one `record_failure` or `record_success`.
-    pub fn allow(&self, ip: IpAddr) -> bool {
-        self.allow_at(ip, Instant::now())
+    /// Whether this IP may attempt a login now. `Some` **reserves** one attempt against the window
+    /// immediately and hands it back as an RAII [`AttemptGuard`]: resolve it with
+    /// [`AttemptGuard::failure`] or [`AttemptGuard::success`]; merely dropping it (the request future
+    /// was cancelled, e.g. a client disconnect during the Argon2 await) releases the reservation at
+    /// once instead of leaking it until the window prune.
+    pub fn allow(self: &Arc<Self>, ip: IpAddr) -> Option<AttemptGuard> {
+        if self.allow_at(ip, Instant::now()) {
+            Some(AttemptGuard {
+                limiter: Arc::clone(self),
+                ip,
+                resolved: false,
+            })
+        } else {
+            None
+        }
     }
 
     /// Record a failed login attempt for this IP, converting its pending reservation into a failure.
-    pub fn record_failure(&self, ip: IpAddr) {
+    fn record_failure(&self, ip: IpAddr) {
         self.record_failure_at(ip, Instant::now());
     }
 
-    /// Clear the attempt counter after a successful login: a legitimate user who mistyped a few times
-    /// must not carry the penalty into the next window.
-    pub fn record_success(&self, ip: IpAddr) {
-        let mut entries = self.entries.lock().unwrap();
-        entries.remove(&ip);
+    /// Release one pending reservation for this IP without recording a failure — used by a successful
+    /// login and by a dropped [`AttemptGuard`]. Deliberately surgical: it never touches the failure
+    /// counter or other requests' reservations, because behind a shared NAT one legitimate success
+    /// must not refresh an attacker's budget (the old whole-entry removal did exactly that). A
+    /// legitimate user who mistyped keeps the recorded failures until the 60s window expires.
+    fn release_pending(&self, ip: IpAddr) {
+        self.release_pending_at(ip, Instant::now());
     }
 
     /// Time-injectable core of [`allow`], used by tests to step through window expiry.
@@ -127,6 +143,51 @@ impl LoginRateLimiter {
         });
         e.pending = e.pending.saturating_sub(1);
         e.failures = e.failures.saturating_add(1);
+    }
+
+    /// Time-injectable core of [`release_pending`]. An entry whose window already expired was pruned
+    /// together with its reservations, so a missing entry is a valid no-op.
+    fn release_pending_at(&self, ip: IpAddr, now: Instant) {
+        let mut entries = self.entries.lock().unwrap();
+        prune(&mut entries, now);
+        if let Some(e) = entries.get_mut(&ip) {
+            e.pending = e.pending.saturating_sub(1);
+        }
+    }
+}
+
+/// RAII reservation handle returned by [`LoginRateLimiter::allow`]. Exactly one of [`failure`]
+/// (converts the reservation into a counted failure) or [`success`] (releases the reservation
+/// surgically, see [`LoginRateLimiter::release_pending`]) should be called; dropping the guard
+/// unresolved — the request future was cancelled — releases the reservation immediately.
+///
+/// [`failure`]: AttemptGuard::failure
+/// [`success`]: AttemptGuard::success
+pub struct AttemptGuard {
+    limiter: Arc<LoginRateLimiter>,
+    ip: IpAddr,
+    resolved: bool,
+}
+
+impl AttemptGuard {
+    /// Convert the reservation into a recorded failure.
+    pub fn failure(mut self) {
+        self.resolved = true;
+        self.limiter.record_failure(self.ip);
+    }
+
+    /// Release the reservation after a successful login without touching recorded failures.
+    pub fn success(mut self) {
+        self.resolved = true;
+        self.limiter.release_pending(self.ip);
+    }
+}
+
+impl Drop for AttemptGuard {
+    fn drop(&mut self) {
+        if !self.resolved {
+            self.limiter.release_pending(self.ip);
+        }
     }
 }
 
@@ -166,16 +227,21 @@ mod tests {
         assert!(l.allow_at(ip(1), t0 + WINDOW));
     }
 
+    /// Shared-NAT semantics: a success releases ONLY its own reservation and never refreshes the
+    /// failure counter — otherwise one legitimate login behind the same NAT would reset an
+    /// attacker's budget. Failures therefore persist until the window expires, success or not.
     #[test]
-    fn success_clears_the_counter() {
-        let l = LoginRateLimiter::new();
-        let t0 = Instant::now();
-        for _ in 0..MAX_FAILURES {
-            l.record_failure_at(ip(1), t0);
+    fn success_does_not_refresh_failures_behind_shared_nat() {
+        let l = Arc::new(LoginRateLimiter::new());
+        // Attacker on the shared IP burns 4 of 5 attempts.
+        for _ in 0..MAX_FAILURES - 1 {
+            l.allow(ip(1)).expect("within budget").failure();
         }
-        assert!(!l.allow_at(ip(1), t0));
-        l.record_success(ip(1));
-        assert!(l.allow_at(ip(1), t0));
+        // Legitimate user on the same IP logs in successfully.
+        l.allow(ip(1)).expect("one attempt left").success();
+        // The success released only its own reservation: exactly one attempt remains, then blocked.
+        l.allow(ip(1)).expect("failures must be untouched by the success").failure();
+        assert!(l.allow(ip(1)).is_none(), "budget must be exhausted, not refreshed");
     }
 
     #[test]
@@ -224,17 +290,53 @@ mod tests {
         assert!(l.allow_at(ip(1), t0 + WINDOW));
     }
 
-    /// A success releases the reservation and clears the counter, so a legitimate login within the
-    /// budget never blocks the next attempt.
+    /// A success releases its reservation, so repeated legitimate logins never block the next attempt.
     #[test]
     fn success_releases_the_reservation() {
-        let l = LoginRateLimiter::new();
-        let t0 = Instant::now();
+        let l = Arc::new(LoginRateLimiter::new());
         for _ in 0..MAX_FAILURES {
-            assert!(l.allow_at(ip(1), t0));
-            l.record_success(ip(1));
+            l.allow(ip(1)).expect("a released reservation frees the slot").success();
         }
-        assert!(l.allow_at(ip(1), t0));
+        assert!(l.allow(ip(1)).is_some());
+    }
+
+    /// FIX for the cancelled-request leak: a guard dropped without an outcome (the request future was
+    /// cancelled by a client disconnect during the Argon2 await) releases its reservation at once —
+    /// the slot is free immediately, not only after the 60s window prune.
+    #[test]
+    fn dropped_guard_releases_the_reservation_immediately() {
+        let l = Arc::new(LoginRateLimiter::new());
+        // Exhaust the budget with unresolved in-flight reservations.
+        let guards: Vec<_> = (0..MAX_FAILURES)
+            .map(|_| l.allow(ip(1)).expect("within budget"))
+            .collect();
+        assert!(l.allow(ip(1)).is_none(), "in-flight reservations must count");
+        // Cancel every request: dropping the guards frees the slots without any window expiry.
+        drop(guards);
+        assert!(
+            l.allow(ip(1)).is_some(),
+            "a dropped guard must release its reservation immediately"
+        );
+    }
+
+    /// An explicitly resolved guard releases exactly once: were Drop to release a second time, it
+    /// would steal a *different* request's still-pending reservation and re-open its slot.
+    #[test]
+    fn resolved_guard_does_not_double_release_on_drop() {
+        let l = Arc::new(LoginRateLimiter::new());
+        // One reservation stays in flight while two others resolve; a double release would
+        // decrement the in-flight reservation away.
+        let mut guards = vec![l.allow(ip(1)).expect("in-flight reservation")];
+        l.allow(ip(1)).expect("second attempt").failure();
+        l.allow(ip(1)).expect("third attempt").success();
+        // Correct accounting: 1 pending + 1 failure leaves exactly MAX_FAILURES - 2 slots.
+        for _ in 0..MAX_FAILURES - 2 {
+            guards.push(l.allow(ip(1)).expect("remaining budget"));
+        }
+        assert!(
+            l.allow(ip(1)).is_none(),
+            "a resolved guard must not release a second time on drop"
+        );
     }
 
     /// Dual-instance fix: two server instances over the same data directory share ONE limiter, so an

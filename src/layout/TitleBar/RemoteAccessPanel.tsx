@@ -44,19 +44,22 @@ export function orderUrlsBySelectedIp(urls: string[], ip: string): string[] {
  * Display URLs for an explicitly selected IP. The backend URL list mirrors the interface snapshot
  * taken at server START, while the selector enumerates interfaces LIVE — an interface that appeared
  * afterwards (e.g. Tailscale connecting later) is selectable but absent from the snapshot. In that
- * case, derive its URL from the snapshot's scheme (which encodes the serve mode) and the live port
- * and put it first, so the primary copied link and the QR carry the chosen IP without a restart.
+ * case, synthesize its URL from the backend-reported scheme (explicit in the status since the
+ * `scheme` field; inferring from the snapshot's first URL remains only as a fallback for a stale
+ * backend without the field) and the live port, and put it first, so the primary copied link and
+ * the QR carry the chosen IP without a restart.
  */
 export function urlsForSelectedIp(
   urls: string[],
   ip: string,
   port: number | null,
+  scheme: string | null,
 ): string[] {
   if (!ip) return urls;
   if (urls.some((u) => hostOf(u) === ip)) return orderUrlsBySelectedIp(urls, ip);
   if (urls.length === 0 || port == null) return urls;
-  const scheme = urls[0].startsWith("http://") ? "http" : "https";
-  return [`${scheme}://${ip}:${port}`, ...urls];
+  const s = scheme ?? (urls[0].startsWith("http://") ? "http" : "https");
+  return [`${s}://${ip}:${port}`, ...urls];
 }
 
 export function RemoteAccessPanel({
@@ -131,6 +134,17 @@ export function RemoteAccessPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [status?.running, status?.port]);
 
+  // Invalidate in-flight pairing responses and reset the COMPLETE pairing state; used when the
+  // service stops or its pairing link can no longer be trusted. Bumping pairSeq strands in-flight
+  // requests, whose `finally` therefore skips its own busy reset — so pairBusy must be cleared
+  // here, or an invalidated in-flight request would leave the regenerate button disabled forever.
+  const resetPairing = () => {
+    pairSeq.current++;
+    pairRequestedIp.current = null;
+    setPairUrl(null);
+    setPairBusy(false);
+  };
+
   // While running, load registered devices and automatically show a pairing link; clear them on stop.
   useEffect(() => {
     if (status?.running) {
@@ -140,10 +154,7 @@ export function RemoteAccessPanel({
       void genPairing(false);
     } else {
       setDevices([]);
-      setPairUrl(null);
-      // Invalidate in-flight pairing responses and the request marker; the next start re-pairs fresh.
-      pairSeq.current++;
-      pairRequestedIp.current = null;
+      resetPairing();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [status?.running]);
@@ -195,9 +206,12 @@ export function RemoteAccessPanel({
     setError("");
     try {
       await webServerStop();
+      // The service is down: invalidate the pairing state HERE and not only via the status-driven
+      // effect, which never fires when the status query below throws (status would stay "running"
+      // and a late in-flight pairing response could re-populate the dead link).
+      resetPairing();
       setStatus(await webServerStatus());
       setPassword("");
-      setPairUrl(null);
     } catch (e) {
       setError(String(e));
     } finally {
@@ -264,7 +278,12 @@ export function RemoteAccessPanel({
     : status?.url
       ? [status.url]
       : [];
-  const urls = urlsForSelectedIp(baseUrls, effectiveIp, status?.port ?? null);
+  const urls = urlsForSelectedIp(
+    baseUrls,
+    effectiveIp,
+    status?.port ?? null,
+    status?.scheme ?? null,
+  );
 
   // Advertised-IP selector, shown while stopped (below the port field) and while running (above the
   // pairing block); one persisted selection drives both.

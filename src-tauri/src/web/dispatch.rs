@@ -90,6 +90,15 @@ fn is_protected_setting(key: &str) -> bool {
 /// fallbacks), `vlx-web-access.json` (pairing token), `vlx-e2ee-key.b64`, and the TLS key. This is a
 /// narrow deny-list, not file-API sandboxing: every path outside the data directory stays allowed so
 /// legitimate remote features (doc editor, file viewer) keep working; local origins are unrestricted.
+///
+/// Accepted limits (reviewed, deliberate — not oversights):
+/// - Hard links are invisible to path resolution: a hard link to a secret created OUTSIDE the data
+///   dir before this check would pass the prefix comparison. Creating one requires local filesystem
+///   access the remote client does not have through this API (rename into the data dir is gated).
+/// - The resolve-then-operate sequence has an inherent check-then-use window: a path component can
+///   be swapped for a symlink between the check and the file operation. Closing either gap would
+///   need openat-style descriptor-anchored traversal, which std::fs does not expose; the threat
+///   model (a paired remote device already trusted with a shell) accepts both.
 fn guard_remote_path(app: &AppCtx, origin: CallOrigin, path: &str) -> Result<(), String> {
     if origin != CallOrigin::Remote {
         return Ok(());
@@ -242,6 +251,8 @@ pub fn dispatch(
                 opt_str(args, "operationId").unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
             // Cloning creates a directory tree at a caller-chosen location; planting files inside
             // the data dir is the same class as rename_path's `to` direction, so gate the target.
+            // folderName needs no separate gate: git.rs rejects separators in it and joins it under
+            // this gated parentDir, so the composed target cannot escape the checked prefix.
             let parent_dir = req_str(args, "parentDir")?;
             guard_remote_path(app, origin, &parent_dir)?;
             to_value(core::clone_project(
@@ -431,9 +442,17 @@ pub fn dispatch(
             // actually read, exactly like the files::* content arms.
             let cwd = req_str(args, "cwd")?;
             let path = req_str(args, "path")?;
-            let target = git::file_diff_worktree_path(&cwd, &path);
-            guard_remote_path(app, origin, &target.to_string_lossy())?;
-            to_value(git::file_diff(&cwd, &path)?)
+            if origin == CallOrigin::Remote {
+                // Compute the effective worktree path ONCE, gate it, and hand the SAME value through
+                // to the read: checked path and used path cannot diverge, and the repo_top git
+                // subprocess runs once instead of twice.
+                let target = git::file_diff_worktree_path(&cwd, &path);
+                guard_remote_path(app, origin, &target.to_string_lossy())?;
+                to_value(git::file_diff_at(&cwd, &path, &target)?)
+            } else {
+                // Local lane: no ACL applies, so skip the extra repo_top subprocess entirely.
+                to_value(git::file_diff(&cwd, &path)?)
+            }
         }
         "git_recent_commits" => to_value(git::recent_commits(&req_str(args, "cwd")?, 5)),
         "agent_context_info" => {
@@ -554,8 +573,13 @@ pub fn dispatch(
         // path. Electron, browser, and remote windows use this authenticated and optionally encrypted call.
         "save_doc_image" => {
             // Writes into `<docPath parent>/assets/` — a caller-chosen location, same write class.
+            // Gate BOTH the document path and the EFFECTIVE assets directory it writes into: with a
+            // docPath just outside the data dir, an `assets` entry symlinked into it would pass the
+            // docPath check alone while the actual write lands inside the data dir (check/use split).
             let doc_path = req_str(args, "docPath")?;
             guard_remote_path(app, origin, &doc_path)?;
+            let assets = files::doc_assets_dir(&doc_path)?;
+            guard_remote_path(app, origin, &assets.to_string_lossy())?;
             to_value(files::save_doc_image(
                 &doc_path,
                 &b64_bytes(args, "bytesB64")?,
@@ -1360,6 +1384,9 @@ mod tests {
             ("rename_path", json!({ "from": format!("{}/nonexistent-src.txt", std::env::temp_dir().to_string_lossy()), "to": format!("{dd}/planted.txt") }), format!("{dd}/planted.txt")),
             ("delete_path", json!({ "path": secret_str }), secret_str.clone()),
             ("save_doc_image", json!({ "docPath": format!("{dd}/doc.md"), "bytesB64": "aGk=", "ext": "png" }), format!("{dd}/doc.md")),
+            // Planting direction through clone: a remote client must not clone a fresh repository
+            // into the data dir; the gate fires on parentDir before any git/network work starts.
+            ("clone_project", json!({ "url": "https://example.invalid/repo.git", "parentDir": dd.clone() }), dd.clone()),
             ("remove_worktree", json!({ "path": dd.clone(), "force": true }), dd.clone()),
             ("export_session_context", json!({ "sessionId": "no-such-session", "destPath": format!("{dd}/export.md") }), format!("{dd}/export.md")),
             // git_file_diff reads the worktree side with a raw fs::read of repo_top(cwd).join(path):
@@ -1378,6 +1405,14 @@ mod tests {
         assert!(secret.exists(), "the secret must survive the denied mutations");
         assert!(!data_dir.join("planted.txt").exists());
         assert!(!data_dir.join("planted-dir").exists());
+
+        // Deliberate pinning of the metadata-only exceptions: list_dir and stat_file stay usable
+        // remotely even INSIDE the data dir — they return names/sizes/mtimes, never content. If one
+        // of them ever starts returning content, gate it and update this assertion consciously.
+        dispatch(&app, "list_dir", &json!({ "path": dd.clone() }), "ws-1", CallOrigin::Remote)
+            .expect("list_dir must stay ungated for remote origins (metadata only)");
+        dispatch(&app, "stat_file", &json!({ "path": secret_str }), "ws-1", CallOrigin::Remote)
+            .expect("stat_file must stay ungated for remote origins (metadata only)");
 
         // Outside the data dir the same arms keep working remotely (doc editor / file viewer).
         let project = std::env::temp_dir().join(format!("vlx-acl-arms-{}", uuid::Uuid::new_v4()));
@@ -1486,6 +1521,234 @@ mod tests {
         let _ = std::fs::remove_dir_all(&project);
     }
 
+    /// Argument keys that carry a caller-chosen filesystem path anywhere in this dispatch match.
+    /// The trailing `)` distinguishes e.g. `args, "to")` from `args, "token")`.
+    const PATH_KEYS: &[&str] = &[
+        "args, \"path\")",
+        "args, \"cwd\")",
+        "args, \"from\")",
+        "args, \"to\")",
+        "args, \"destPath\")",
+        "args, \"docPath\")",
+        "args, \"repoRoot\")",
+        "args, \"wtPath\")",
+        "args, \"repo\")",
+        "args, \"parentDir\")",
+        "args, \"worktreePath\")",
+        "args, \"rootPath\")",
+        // folderName is a path *component*: clone_project joins it under the (gated) parentDir and
+        // rejects separators, so the gate on parentDir covers the composed target — but the key is
+        // tracked here so a future arm consuming folderName without such a gate turns red.
+        "args, \"folderName\")",
+    ];
+    /// Deliberately ungated path-taking arms, each with its standing justification (mirrors the
+    /// sweep comment at the file arms): metadata-only, or repo-scoped through git itself — never
+    /// raw bytes of a caller-named file, mutations refused by git on the non-repo data dir.
+    const UNGATED_JUSTIFIED: &[&str] = &[
+        "list_dir",        // metadata only (names, sizes, mtimes)
+        "stat_file",       // metadata only
+        "get_git_status",  // derived repo status, no file content
+        "git_changed_files",
+        "git_recent_commits",
+        "git_branch_list",
+        "git_merge_preview", // diff_stat summary, no raw file bytes
+        "git_merge_apply",   // git-mediated mutation, refused outside a repository
+        "create_worktree",   // git-mediated, refused outside a repository
+        "list_worktrees",
+        "commit_worktree",   // git-mediated mutation, refused outside a repository
+        "delete_branch",
+        // Session-tree metadata arms: `cwd`/`worktreePath` only choose where a PTY spawns; the
+        // arms read and write no file content, and a remote paired device is trusted with a
+        // shell in any directory by the threat model anyway.
+        "create_group",
+        "create_session",
+        "persist_session",
+        "update_session",
+        // Pure DB insert: rootPath is stored as the project root and never read or written on disk
+        // by this arm; the sessions it enables later run through the shell trust above.
+        "import_project",
+    ];
+
+    /// The command names of one arm-start line, or None when the line is no arm start.
+    fn arm_names(line: &str) -> Option<Vec<String>> {
+        let t = line.trim_start();
+        if !t.starts_with('"') {
+            return None;
+        }
+        let (patterns, _) = t.split_once("=>")?;
+        let mut names = Vec::new();
+        for part in patterns.split('|') {
+            let name = part.trim().strip_prefix('"')?.strip_suffix('"')?;
+            if name.is_empty()
+                || !name
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+            {
+                return None;
+            }
+            names.push(name.to_string());
+        }
+        Some(names)
+    }
+
+    /// Non-comment lines that LOOK like a match arm (start with `"` and contain `=>`) but are not
+    /// recognized by [`arm_names`] — e.g. a future guard arm (`"cmd" if cond =>`) or a pattern
+    /// wrapped across lines. Such a line would silently fold its body into the predecessor arm,
+    /// exactly the parser-blindness class removed for multi-pattern arms; the chokepoint asserts
+    /// this list is empty so any new arm shape fails LOUD instead of hiding a coverage gap.
+    fn unrecognized_arm_like_lines(src: &str) -> Vec<String> {
+        src.lines()
+            .map(str::trim_start)
+            .filter(|t| !t.starts_with("//"))
+            .filter(|t| t.starts_with('"') && t.contains("=>") && arm_names(t).is_none())
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// Parse `match` arms out of dispatch source text into (pattern names, body) pairs. An arm
+    /// starts at a line whose trimmed form is `"name" => ...` or the multi-pattern
+    /// `"a" | "b" => ...`; everything up to the next such line belongs to its body, attributed to
+    /// EVERY name of the pattern. Comment lines are skipped so prose mentioning
+    /// guard_remote_path can never satisfy the check.
+    fn parse_dispatch_arms(src: &str) -> Vec<(Vec<String>, String)> {
+        let mut arms: Vec<(Vec<String>, String)> = Vec::new();
+        for line in src.lines() {
+            let t = line.trim_start();
+            if t.starts_with("//") {
+                continue;
+            }
+            if let Some(names) = arm_names(line) {
+                arms.push((names, String::new()));
+            }
+            if let Some((_, body)) = arms.last_mut() {
+                body.push_str(line);
+                body.push('\n');
+            }
+        }
+        arms
+    }
+
+    /// Negative test of the arm parser itself: a multi-pattern arm (`"a" | "b" =>`) must open a NEW
+    /// arm attributed to both names — the old parser missed it and silently folded such a body into
+    /// the predecessor arm, letting an ungated multi-pattern arm inherit the predecessor's gate.
+    /// Commented-out arms must stay invisible.
+    #[test]
+    fn dispatch_arm_parser_recognizes_multi_pattern_arms() {
+        let src = r#"
+        match cmd {
+            "single" => {
+                let path = req_str(args, "path")?;
+                guard_remote_path(app, origin, &path)?;
+            }
+            "multi_a" | "multi_b" => {
+                let path = req_str(args, "path")?;
+            }
+            // "commented_out" => req_str(args, "path")?,
+            other => Err(()),
+        }
+        "#;
+        let arms = parse_dispatch_arms(src);
+        let names: Vec<&Vec<String>> = arms.iter().map(|(n, _)| n).collect();
+        assert_eq!(names, vec![&vec!["single".to_string()], &vec![
+            "multi_a".to_string(),
+            "multi_b".to_string()
+        ]]);
+        // The multi-pattern body belongs to its own arm, NOT to the predecessor: it extracts a path
+        // and carries no gate, while `single` keeps its gate.
+        assert!(arms[0].1.contains("guard_remote_path"));
+        assert!(arms[1].1.contains("args, \"path\")"));
+        assert!(
+            !arms[1].1.contains("guard_remote_path"),
+            "the multi-pattern arm must not inherit the predecessor's gate"
+        );
+
+        // Pin the chosen behavior for arm shapes the parser does NOT understand (e.g. a future
+        // guard arm): they are not silently folded away — the unrecognized-line scan reports them,
+        // and the chokepoint turns red until the parser is extended.
+        let guarded = r#"
+        match cmd {
+            "plain" => Ok(()),
+            "guarded" if cond => {
+                let path = req_str(args, "path")?;
+            }
+            other => Err(()),
+        }
+        "#;
+        let unrecognized = unrecognized_arm_like_lines(guarded);
+        assert_eq!(
+            unrecognized,
+            vec![r#""guarded" if cond => {"#.to_string()],
+            "a guard arm must be surfaced as unrecognized, never silently folded"
+        );
+        assert!(unrecognized_arm_like_lines(src).is_empty());
+    }
+
+    /// FIX for the save_doc_image check/use divergence: the arm gates the EFFECTIVE write target
+    /// `<docPath parent>/assets`, not only docPath — an `assets` entry symlinked into the data dir
+    /// beside an innocent-looking document would otherwise route the write into the data dir. Normal
+    /// documents keep working remotely, and local origins stay unrestricted.
+    #[test]
+    fn save_doc_image_gates_the_effective_assets_path() {
+        let app = test_ctx();
+        let data_dir = app.data_dir().unwrap();
+
+        let project = std::env::temp_dir().join(format!("vlx-acl-docimg-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&project).unwrap();
+        let doc = project.join("note.md");
+        std::fs::write(&doc, b"# hi").unwrap();
+        let doc_str = doc.to_string_lossy().to_string();
+
+        // Normal remote save outside the data dir keeps working (doc editor image paste).
+        let rel = dispatch(
+            &app,
+            "save_doc_image",
+            &json!({ "docPath": doc_str, "bytesB64": "aGk=", "ext": "png" }),
+            "ws-1",
+            CallOrigin::Remote,
+        )
+        .expect("remote doc-image save outside the data dir must keep working");
+        assert!(rel.as_str().unwrap().starts_with("assets/"));
+
+        // Attack shape (unix): replace the assets dir with a symlink into the data dir. The docPath
+        // gate alone passes (the document lies outside), but the effective-assets gate denies.
+        #[cfg(unix)]
+        {
+            let assets = project.join("assets");
+            std::fs::remove_dir_all(&assets).unwrap();
+            let inside = data_dir.join("planted-assets");
+            std::os::unix::fs::symlink(&inside, &assets).unwrap();
+            let err = dispatch(
+                &app,
+                "save_doc_image",
+                &json!({ "docPath": doc_str, "bytesB64": "aGk=", "ext": "png" }),
+                "ws-1",
+                CallOrigin::Remote,
+            )
+            .unwrap_err();
+            assert_eq!(
+                err,
+                format!("remote_path_forbidden:{}", assets.to_string_lossy()),
+                "the effective assets path must be gated, not just docPath"
+            );
+            assert!(!inside.exists(), "the denied write must not create the directory");
+
+            // Local origins stay unrestricted even through the symlinked assets dir. Pre-create the
+            // link target: create_dir_all cannot materialize a directory through a dangling symlink,
+            // and this assertion is about the ACL, not filesystem creation semantics.
+            std::fs::create_dir_all(&inside).unwrap();
+            dispatch(
+                &app,
+                "save_doc_image",
+                &json!({ "docPath": doc_str, "bytesB64": "aGk=", "ext": "png" }),
+                DESKTOP_SOURCE,
+                CallOrigin::Local,
+            )
+            .expect("local save through the symlinked assets dir must stay allowed");
+        }
+
+        let _ = std::fs::remove_dir_all(&project);
+    }
+
     /// Structural chokepoint for the FIX-5 class (the sweep completeness was claimed twice by prose
     /// and twice wrong: read_file_preview in round 0, git_file_diff in round 1). This test parses the
     /// REAL dispatch source: every match arm that extracts a caller-chosen path-like argument must
@@ -1501,74 +1764,16 @@ mod tests {
         // Only the production half of the file: everything before the test module.
         let prod = SRC.split("#[cfg(test)]").next().unwrap();
 
-        // Argument keys that carry a caller-chosen filesystem path anywhere in this dispatch match.
-        // The trailing `)` distinguishes e.g. `args, "to")` from `args, "token")`.
-        const PATH_KEYS: &[&str] = &[
-            "args, \"path\")",
-            "args, \"cwd\")",
-            "args, \"from\")",
-            "args, \"to\")",
-            "args, \"destPath\")",
-            "args, \"docPath\")",
-            "args, \"repoRoot\")",
-            "args, \"wtPath\")",
-            "args, \"repo\")",
-            "args, \"parentDir\")",
-            "args, \"worktreePath\")",
-        ];
-        // Deliberately ungated path-taking arms, each with its standing justification (mirrors the
-        // sweep comment at the file arms): metadata-only, or repo-scoped through git itself — never
-        // raw bytes of a caller-named file, mutations refused by git on the non-repo data dir.
-        const UNGATED_JUSTIFIED: &[&str] = &[
-            "list_dir",        // metadata only (names, sizes, mtimes)
-            "stat_file",       // metadata only
-            "get_git_status",  // derived repo status, no file content
-            "git_changed_files",
-            "git_recent_commits",
-            "git_branch_list",
-            "git_merge_preview", // diff_stat summary, no raw file bytes
-            "git_merge_apply",   // git-mediated mutation, refused outside a repository
-            "create_worktree",   // git-mediated, refused outside a repository
-            "list_worktrees",
-            "commit_worktree",   // git-mediated mutation, refused outside a repository
-            "delete_branch",
-            // Session-tree metadata arms: `cwd`/`worktreePath` only choose where a PTY spawns; the
-            // arms read and write no file content, and a remote paired device is trusted with a
-            // shell in any directory by the threat model anyway.
-            "create_group",
-            "create_session",
-            "persist_session",
-            "update_session",
-        ];
+        // Fail loud on any arm-shaped line the parser cannot attribute (guard arms, wrapped
+        // patterns): its body would silently inherit the predecessor's gate status otherwise.
+        let unrecognized = unrecognized_arm_like_lines(prod);
+        assert!(
+            unrecognized.is_empty(),
+            "dispatch contains arm-like lines the ACL parser does not recognize — extend the \
+             parser (arm_names) before relying on this chokepoint: {unrecognized:?}"
+        );
 
-        // Split the source into (arm name, arm body) pairs: an arm starts at a line whose trimmed
-        // form is `"name" => ...`; everything up to the next such line belongs to its body. Comment
-        // lines are skipped so prose mentioning guard_remote_path can never satisfy the check.
-        let mut arms: Vec<(String, String)> = Vec::new();
-        for line in prod.lines() {
-            let t = line.trim_start();
-            if t.starts_with("//") {
-                continue;
-            }
-            let is_arm_start = t
-                .strip_prefix('"')
-                .and_then(|rest| rest.split_once('"'))
-                .map(|(name, after)| {
-                    after.trim_start().starts_with("=>")
-                        && name
-                            .chars()
-                            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
-                })
-                .unwrap_or(false);
-            if is_arm_start {
-                let name = t[1..].split('"').next().unwrap().to_string();
-                arms.push((name, String::new()));
-            }
-            if let Some((_, body)) = arms.last_mut() {
-                body.push_str(line);
-                body.push('\n');
-            }
-        }
+        let arms = parse_dispatch_arms(prod);
         assert!(
             arms.len() > 50,
             "the arm parser no longer sees the dispatch match (found {} arms) — fix the parser, \
@@ -1576,27 +1781,31 @@ mod tests {
             arms.len()
         );
 
-        for (name, body) in &arms {
+        for (names, body) in &arms {
             if !PATH_KEYS.iter().any(|k| body.contains(k)) {
                 continue;
             }
             let gated = body.contains("guard_remote_path");
-            let excepted = UNGATED_JUSTIFIED.contains(&name.as_str());
-            assert!(
-                gated || excepted,
-                "dispatch arm `{name}` extracts a caller-chosen path but neither calls \
-                 guard_remote_path nor is a justified exception — gate it or add it to \
-                 UNGATED_JUSTIFIED with a reviewed reason"
-            );
-            assert!(
-                !(gated && excepted),
-                "dispatch arm `{name}` is gated but still listed in UNGATED_JUSTIFIED — remove the \
-                 stale exception so the list stays accurate"
-            );
+            // Every pattern of a (possibly multi-pattern) arm must individually be justified when
+            // the shared body is ungated; a gated body may not keep stale exception entries.
+            for name in names {
+                let excepted = UNGATED_JUSTIFIED.contains(&name.as_str());
+                assert!(
+                    gated || excepted,
+                    "dispatch arm `{name}` extracts a caller-chosen path but neither calls \
+                     guard_remote_path nor is a justified exception — gate it or add it to \
+                     UNGATED_JUSTIFIED with a reviewed reason"
+                );
+                assert!(
+                    !(gated && excepted),
+                    "dispatch arm `{name}` is gated but still listed in UNGATED_JUSTIFIED — remove \
+                     the stale exception so the list stays accurate"
+                );
+            }
         }
         // Every exception must still exist as a path-taking arm, so the list cannot rot.
         for name in UNGATED_JUSTIFIED {
-            let arm = arms.iter().find(|(n, _)| n == name);
+            let arm = arms.iter().find(|(names, _)| names.iter().any(|n| n == name));
             let takes_path = arm
                 .map(|(_, body)| PATH_KEYS.iter().any(|k| body.contains(k)))
                 .unwrap_or(false);

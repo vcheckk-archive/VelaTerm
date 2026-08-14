@@ -314,12 +314,14 @@ async fn handshake(
         .and_then(|p| e2ee::parse_auth(&p))?;
     // Rate limit before any credential verification; the explicit encrypted reason lets clients distinguish
     // throttling from a wrong password.
-    if !ctx.limiter.allow(ip) {
+    // The RAII guard covers the whole credential check; a cancelled handshake future (client
+    // disconnect during the Argon2 await) releases the reservation on drop instead of leaking it.
+    let Some(attempt) = ctx.limiter.allow(ip) else {
         if let Some(ct) = cipher.encrypt_text(&e2ee::err_msg("rate_limited")) {
             let _ = ws_tx.send(Message::Text(ct)).await;
         }
         return None;
-    }
+    };
     let token_ok = ctx.auth.validate_pairing_token(&token);
     // Only a holder of the current pairing token may trigger the expensive Argon2 verify; the token check
     // is constant-time and cheap, so unauthenticated strangers cost the server nothing memory-hard.
@@ -338,7 +340,7 @@ async fn handshake(
         .map(|id| ctx.auth.is_blocked(id))
         .unwrap_or(false);
     if token_ok && pw_ok && !blocked {
-        ctx.limiter.record_success(ip);
+        attempt.success();
         // After both credentials pass and the device is not revoked, register its self-reported display identity.
         ctx.auth
             .register_device(device_id.as_deref(), device_name.as_deref());
@@ -347,7 +349,7 @@ async fn handshake(
         // Return device_id so the main loop can detect revocation during later heartbeats.
         Some((cipher, device_id))
     } else {
-        ctx.limiter.record_failure(ip);
+        attempt.failure();
         // Return an encrypted error, proving key exchange succeeded but identity failed, then close.
         if let Some(ct) = cipher.encrypt_text(&e2ee::err_msg("unauthorized")) {
             let _ = ws_tx.send(Message::Text(ct)).await;
@@ -611,10 +613,10 @@ mod tests {
         Ctx {
             app,
             // The verifier PHC is never exercised here; handle_text runs after authentication.
-            auth: Arc::new(super::super::auth::AuthState::load_or_create(
-                "unused-phc",
-                &data_dir,
-            )),
+            auth: Arc::new(
+                super::super::auth::AuthState::load_or_create("unused-phc", &data_dir)
+                    .expect("failed to open the test pairing store"),
+            ),
             e2ee_keys: Arc::new(e2ee::ServerKeys::load_or_create(&data_dir)
                 .expect("failed to create test server keys")),
             mode,

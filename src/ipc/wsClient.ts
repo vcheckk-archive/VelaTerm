@@ -334,9 +334,17 @@ class WsClient {
     return bytesToB64(frame);
   }
 
-  /** Decrypt an inbound base64 text frame; return null on failure. */
+  /** Decrypt an inbound base64 text frame; return null on failure — including malformed base64,
+   *  where atob throws: an invalid frame must degrade to the caller's null path (failHandshake
+   *  during the handshake, frame discard afterwards) instead of throwing out of onMessage. */
   private decryptText(b64: string): string | null {
-    const bytes = this.decryptBytes(b64ToBytes(b64));
+    let frame: Uint8Array;
+    try {
+      frame = b64ToBytes(b64);
+    } catch {
+      return null;
+    }
+    const bytes = this.decryptBytes(frame);
     return bytes ? textDecoder.decode(bytes) : null;
   }
 

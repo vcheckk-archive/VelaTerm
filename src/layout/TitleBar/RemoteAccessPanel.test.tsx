@@ -81,6 +81,7 @@ function runningStatus() {
     url: LAN_URL,
     urls: [LAN_URL, CGNAT_URL],
     fingerprint: null,
+    scheme: "https",
   };
 }
 
@@ -95,6 +96,7 @@ function stoppedStatus(extra: Partial<WebServerStatus>): WebServerStatus {
     autostartError: null,
     savedPort: null,
     autoStart: false,
+    scheme: null,
     ...extra,
   };
 }
@@ -413,33 +415,86 @@ describe("stopped-state IP selector", () => {
       expect(copyButtons[0].textContent).not.toContain("stale");
     });
   });
+
+  it("stop resets pairing even when the follow-up status query fails; the regenerate button is never stuck busy", async () => {
+    webServerStatusMock.mockResolvedValue(runningStatus());
+    networkInterfacesListMock.mockResolvedValue([
+      { name: "en0", ip: "192.168.1.5", vpn: false },
+    ]);
+    // The automatic pairing request stays in flight for the whole test.
+    const pending: Array<{ resolve: (v: { url: string; deviceToken: string }) => void }> = [];
+    webPairingCreateMock.mockImplementation(
+      () =>
+        new Promise<{ url: string; deviceToken: string }>((resolve) =>
+          pending.push({ resolve }),
+        ),
+    );
+    render(<RemoteAccessPanel onClose={vi.fn()} />);
+    await waitFor(() => expect(pending.length).toBe(1));
+    // While the pairing request is in flight, the regenerate button reports busy.
+    expect(screen.getByText("remote.pairingCreating")).toBeTruthy();
+
+    // Stop succeeds but the follow-up status query FAILS: the panel keeps showing the running view,
+    // so the status-driven effect never fires — the stop path itself must reset the pairing state.
+    webServerStatusMock.mockRejectedValue(new Error("status query failed"));
+    fireEvent.click(screen.getByText("remote.stop"));
+    // Completeness of the reset: pairBusy is cleared although the stranded request's own `finally`
+    // skips it (its sequence number was invalidated) — otherwise the button stays disabled forever.
+    await waitFor(() => expect(screen.getByText("remote.pairingRegenerate")).toBeTruthy());
+
+    // The stranded response resolves late and must not populate a link for the stopped service.
+    pending[0].resolve({ url: `${LAN_URL}/#pair=stale`, deviceToken: "t" });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(screen.queryByTitle("remote.copyUrl")).toBeNull();
+  });
 });
 
 describe("urlsForSelectedIp", () => {
   it("reorders like orderUrlsBySelectedIp when the selected IP is in the snapshot", () => {
-    expect(urlsForSelectedIp([LAN_URL, CGNAT_URL], "100.100.83.2", 8799)).toEqual([
+    expect(urlsForSelectedIp([LAN_URL, CGNAT_URL], "100.100.83.2", 8799, "https")).toEqual([
       CGNAT_URL,
       LAN_URL,
     ]);
   });
 
-  it("synthesizes a URL from the snapshot scheme and the live port when the IP is missing", () => {
-    expect(urlsForSelectedIp([LAN_URL, CGNAT_URL], "100.101.0.7", 8799)).toEqual([
+  it("synthesizes a URL from the explicit backend scheme and the live port when the IP is missing", () => {
+    expect(urlsForSelectedIp([LAN_URL, CGNAT_URL], "100.101.0.7", 8799, "https")).toEqual([
       "https://100.101.0.7:8799",
       LAN_URL,
       CGNAT_URL,
     ]);
     // The plaintext-HTTP mode's scheme is preserved.
-    expect(urlsForSelectedIp(["http://192.168.1.5:8080"], "10.0.0.7", 8080)).toEqual([
+    expect(urlsForSelectedIp(["http://192.168.1.5:8080"], "10.0.0.7", 8080, "http")).toEqual([
+      "http://10.0.0.7:8080",
+      "http://192.168.1.5:8080",
+    ]);
+    // The explicit backend-reported scheme wins; the snapshot is never consulted when it exists.
+    expect(urlsForSelectedIp(["https://192.168.1.5:8080"], "10.0.0.7", 8080, "http")).toEqual([
+      "http://10.0.0.7:8080",
+      "https://192.168.1.5:8080",
+    ]);
+  });
+
+  it("falls back to snapshot inference only when the backend reports no scheme", () => {
+    // Stale backend without the scheme field: infer from the first snapshot URL, as before.
+    expect(urlsForSelectedIp([LAN_URL, CGNAT_URL], "100.101.0.7", 8799, null)).toEqual([
+      "https://100.101.0.7:8799",
+      LAN_URL,
+      CGNAT_URL,
+    ]);
+    expect(urlsForSelectedIp(["http://192.168.1.5:8080"], "10.0.0.7", 8080, null)).toEqual([
       "http://10.0.0.7:8080",
       "http://192.168.1.5:8080",
     ]);
   });
 
   it("returns the list unchanged for automatic, an empty snapshot, or an unknown port", () => {
-    expect(urlsForSelectedIp([LAN_URL, CGNAT_URL], "", 8799)).toEqual([LAN_URL, CGNAT_URL]);
-    expect(urlsForSelectedIp([], "10.0.0.7", 8799)).toEqual([]);
-    expect(urlsForSelectedIp([LAN_URL], "10.0.0.7", null)).toEqual([LAN_URL]);
+    expect(urlsForSelectedIp([LAN_URL, CGNAT_URL], "", 8799, "https")).toEqual([
+      LAN_URL,
+      CGNAT_URL,
+    ]);
+    expect(urlsForSelectedIp([], "10.0.0.7", 8799, "https")).toEqual([]);
+    expect(urlsForSelectedIp([LAN_URL], "10.0.0.7", null, "https")).toEqual([LAN_URL]);
   });
 });
 

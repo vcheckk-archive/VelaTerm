@@ -103,22 +103,31 @@ static PAIRING_STORES: OnceLock<Mutex<HashMap<PathBuf, Weak<PairingState>>>> = O
 impl PairingState {
     /// Open the shared pairing store for a data directory: return the live in-process instance when one
     /// exists, otherwise load (or create) it from `access_store` and register it.
-    pub fn open(data_dir: &Path) -> Arc<Self> {
-        // Canonicalize so `/tmp/x` and `/private/tmp/x` (macOS) resolve to the same store; fall back to
-        // the raw path when the directory cannot be resolved.
-        let key = data_dir
-            .canonicalize()
-            .unwrap_or_else(|_| data_dir.to_path_buf());
+    ///
+    /// Fail-closed keying: the registry key MUST be the canonicalized directory (so `/tmp/x` and
+    /// `/private/tmp/x` on macOS resolve to the same store). A silent fallback to the raw path could
+    /// hand two instances of the same directory two DIFFERENT stores — exactly the split-brain the
+    /// registry exists to prevent — so the directory is created first (canonicalize needs it to
+    /// exist) and a canonicalization failure is an error, never a fallback.
+    pub fn open(data_dir: &Path) -> Result<Arc<Self>, String> {
+        std::fs::create_dir_all(data_dir)
+            .map_err(|e| format!("failed to create the data directory {}: {e}", data_dir.display()))?;
+        let key = data_dir.canonicalize().map_err(|e| {
+            format!(
+                "failed to resolve the data directory {} for the pairing store: {e}",
+                data_dir.display()
+            )
+        })?;
         let registry = PAIRING_STORES.get_or_init(|| Mutex::new(HashMap::new()));
         let mut map = registry.lock().unwrap();
         // Prune dead entries so the map does not accumulate one Weak per finished server lifetime.
         map.retain(|_, w| w.strong_count() > 0);
         if let Some(existing) = map.get(&key).and_then(Weak::upgrade) {
-            return existing;
+            return Ok(existing);
         }
         let state = Arc::new(Self::load_or_create(data_dir));
         map.insert(key, Arc::downgrade(&state));
-        state
+        Ok(state)
     }
 
     /// Load the persisted pairing token, device registry, and blocklist from the data directory, or
@@ -169,6 +178,19 @@ impl PairingState {
     }
 }
 
+/// Test-only introspection: whether a live in-process pairing store exists for this directory. Lets
+/// restart tests PROVE they exercise the file-reload path rather than the shared in-process state.
+#[cfg(test)]
+pub(super) fn pairing_store_alive(data_dir: &Path) -> bool {
+    let key = data_dir
+        .canonicalize()
+        .unwrap_or_else(|_| data_dir.to_path_buf());
+    PAIRING_STORES
+        .get()
+        .and_then(|registry| registry.lock().unwrap().get(&key).and_then(Weak::upgrade))
+        .is_some()
+}
+
 /// Hash a plaintext password into an Argon2id PHC string (default parameters: memory-hard, ~tens of
 /// milliseconds per verify). The PHC string is the only password-derived value ever persisted.
 pub fn hash_password(password: &str) -> Result<String, String> {
@@ -193,12 +215,12 @@ impl AuthState {
     /// Build an instance's auth state: the Argon2id PHC verifier comes from the caller and is never
     /// stored in the pairing-state file; pairing token, registry, and blocklist come from the shared
     /// per-data-dir store (loaded from disk only when no in-process instance already holds it).
-    pub fn load_or_create(verifier_phc: &str, data_dir: &Path) -> Self {
-        Self {
+    pub fn load_or_create(verifier_phc: &str, data_dir: &Path) -> Result<Self, String> {
+        Ok(Self {
             verifier_phc: verifier_phc.to_string(),
             tokens: Mutex::new(HashSet::new()),
-            pairing: PairingState::open(data_dir),
-        }
+            pairing: PairingState::open(data_dir)?,
+        })
     }
 
     /// Synchronous password verification, kept for tests only: every request handler must go through
@@ -239,16 +261,24 @@ impl AuthState {
     /// the service to disconnect all clients immediately. The persisted file is overwritten, so rotation
     /// remains the explicit invalidation path for the restart-surviving token. A persistence failure is
     /// an error: an unpersisted rotation would silently revive the old links after the next restart.
+    /// The candidate state is persisted BEFORE memory is touched, so a failed persist leaves memory and
+    /// disk consistently on the previous state instead of diverging until the next restart.
     pub fn rotate_pairing_token(&self) -> Result<String, String> {
         let mut inner = self.pairing.inner.lock().unwrap();
-        inner.pairing_token = new_token();
-        inner.devices.clear();
         // Full reset: invalidate old links, require every device to pair again, and clear the blocklist.
-        inner.blocked.clear();
-        self.pairing
-            .persist(&inner)
+        let token = new_token();
+        let candidate = access_store::PersistedAccess {
+            pairing_token: token.clone(),
+            blocked_devices: Vec::new(),
+            devices: Vec::new(),
+        };
+        access_store::save(&self.pairing.store_dir, &candidate)
             .map_err(|e| format!("Failed to persist rotated pairing token: {e}"))?;
-        Ok(inner.pairing_token.clone())
+        // Commit to memory only after the durable write succeeded.
+        inner.pairing_token = token.clone();
+        inner.devices.clear();
+        inner.blocked.clear();
+        Ok(token)
     }
 
     /// Register or update a device after handshake, using placeholders for missing self-reported fields.
@@ -304,15 +334,31 @@ impl AuthState {
     /// handshake even with valid credentials, while heartbeat disconnects an existing connection. Other
     /// devices are unaffected. Returns whether it was registered. IDs are self-reported and spoofable.
     /// A persistence failure is an error: an unpersisted revocation would be undone by the next restart.
+    /// The candidate state is persisted BEFORE memory is touched, so a failed persist leaves memory and
+    /// disk consistently on the previous state (the device stays unblocked and visible) instead of an
+    /// in-memory revocation that silently evaporates on restart.
     pub fn block_device(&self, device_id: &str) -> Result<bool, String> {
         let mut inner = self.pairing.inner.lock().unwrap();
-        inner.blocked.insert(device_id.to_string());
-        let before = inner.devices.len();
-        inner.devices.retain(|d| d.device_id != device_id);
-        self.pairing
-            .persist(&inner)
+        let mut blocked = inner.blocked.clone();
+        blocked.insert(device_id.to_string());
+        let devices: Vec<DeviceEntry> = inner
+            .devices
+            .iter()
+            .filter(|d| d.device_id != device_id)
+            .cloned()
+            .collect();
+        let candidate = access_store::PersistedAccess {
+            pairing_token: inner.pairing_token.clone(),
+            blocked_devices: blocked.iter().cloned().collect(),
+            devices: devices.clone(),
+        };
+        access_store::save(&self.pairing.store_dir, &candidate)
             .map_err(|e| format!("Failed to persist device revocation: {e}"))?;
-        Ok(inner.devices.len() < before)
+        // Commit to memory only after the durable write succeeded.
+        let was_registered = devices.len() < inner.devices.len();
+        inner.blocked = blocked;
+        inner.devices = devices;
+        Ok(was_registered)
     }
 
     /// Whether a device ID is blocked, shared by handshake rejection and heartbeat eviction.
@@ -401,19 +447,21 @@ pub async fn login(
     Json(body): Json<LoginBody>,
 ) -> impl IntoResponse {
     let ip = addr.ip();
-    if !ctx.limiter.allow(ip) {
+    // The RAII guard keeps the reservation alive across the Argon2 await; if the client disconnects
+    // and this future is cancelled mid-verify, dropping the guard releases the slot immediately.
+    let Some(attempt) = ctx.limiter.allow(ip) else {
         // The frontend maps 429 to its own localized message; this body is a log/curl-facing fallback.
         return (
             StatusCode::TOO_MANY_REQUESTS,
             "Too many failed login attempts. Try again later.",
         )
             .into_response();
-    }
+    };
     if !ctx.auth.verify_password_async(&body.password).await {
-        ctx.limiter.record_failure(ip);
+        attempt.failure();
         return (StatusCode::UNAUTHORIZED, "Wrong password").into_response();
     }
-    ctx.limiter.record_success(ip);
+    attempt.success();
     let token = ctx.auth.mint();
     Json(serde_json::json!({ "token": token })).into_response()
 }
@@ -456,6 +504,7 @@ mod tests {
     /// Test constructor: hash the plaintext once and build the state in a tag-specific tempdir.
     fn new_auth(password: &str, dir: &PathBuf) -> AuthState {
         AuthState::load_or_create(&hash_password(password).unwrap(), dir)
+            .expect("opening the pairing store in a tempdir must succeed")
     }
 
     #[test]
@@ -553,8 +602,8 @@ mod tests {
         let dir = tempdir("shared");
         let phc = hash_password("pw").unwrap();
 
-        let a = AuthState::load_or_create(&phc, &dir);
-        let b = AuthState::load_or_create(&phc, &dir);
+        let a = AuthState::load_or_create(&phc, &dir).unwrap();
+        let b = AuthState::load_or_create(&phc, &dir).unwrap();
 
         // Registration on B is visible on A.
         b.register_device(Some("dev-a"), Some("Phone"));
@@ -581,7 +630,7 @@ mod tests {
         let dir = tempdir("persist");
         let phc = hash_password("pw").unwrap();
 
-        let a = AuthState::load_or_create(&phc, &dir);
+        let a = AuthState::load_or_create(&phc, &dir).unwrap();
         let token = a.pairing_token();
         a.register_device(Some("dev-a"), Some("Phone"));
         a.register_device(Some("dev-b"), Some("Tablet"));
@@ -590,7 +639,7 @@ mod tests {
         drop(a);
 
         // A fresh instance from the same data dir sees the same token, registry, and blocklist.
-        let b = AuthState::load_or_create(&phc, &dir);
+        let b = AuthState::load_or_create(&phc, &dir).unwrap();
         assert_eq!(b.pairing_token(), token);
         assert!(b.validate_pairing_token(&token));
         assert_eq!(b.list_devices().len(), 1);
@@ -607,7 +656,7 @@ mod tests {
         let dir = tempdir("rotate-persist");
         let phc = hash_password("pw").unwrap();
 
-        let a = AuthState::load_or_create(&phc, &dir);
+        let a = AuthState::load_or_create(&phc, &dir).unwrap();
         let old = a.pairing_token();
         a.register_device(Some("dev-a"), Some("Phone"));
         a.block_device("dev-x").unwrap();
@@ -615,7 +664,7 @@ mod tests {
         assert_ne!(old, rotated);
         drop(a);
 
-        let b = AuthState::load_or_create(&phc, &dir);
+        let b = AuthState::load_or_create(&phc, &dir).unwrap();
         assert_eq!(b.pairing_token(), rotated);
         assert!(!b.validate_pairing_token(&old));
         assert!(b.list_devices().is_empty());
@@ -657,17 +706,48 @@ mod tests {
     }
 
     /// Persistence failures surface to the caller for the operations whose loss would be a security
-    /// regression after restart: revocation and rotation.
+    /// regression after restart: revocation and rotation. Persist-first ordering: on failure the
+    /// in-memory state must be UNCHANGED, so memory and disk stay consistent on the previous state
+    /// instead of an in-memory-only revocation/rotation that evaporates on restart.
     #[test]
-    fn block_and_rotate_surface_persist_failures() {
+    fn block_and_rotate_surface_persist_failures_and_leave_memory_unchanged() {
         let dir = tempdir("persist-err");
         let auth = new_auth("pw", &dir);
+        auth.register_device(Some("dev-a"), Some("Phone"));
+        let token_before = auth.pairing_token();
         // Make the store directory unusable: replace it with a regular file so the tmp-file write fails.
         std::fs::remove_dir_all(&dir).unwrap();
         std::fs::write(&dir, b"not a directory").unwrap();
+
         assert!(auth.block_device("dev-a").is_err());
+        // Memory rolled with the failure: the device is neither blocked nor deregistered.
+        assert!(!auth.is_blocked("dev-a"), "a failed persist must not block in memory only");
+        assert_eq!(auth.list_devices().len(), 1, "a failed persist must not deregister in memory");
+
         assert!(auth.rotate_pairing_token().is_err());
+        // Memory keeps the old token: a memory-only rotation would strand every existing link
+        // while the disk still admits the old one after restart.
+        assert!(
+            auth.validate_pairing_token(&token_before),
+            "a failed persist must not rotate the token in memory only"
+        );
         let _ = std::fs::remove_file(&dir);
+    }
+
+    /// Fail-closed registry keying: a data directory that cannot be created/canonicalized (its parent
+    /// is a regular file) is an error — never a silent raw-path fallback, which could hand two
+    /// instances of the same directory two different pairing stores.
+    #[test]
+    fn open_fails_closed_when_the_directory_cannot_be_resolved() {
+        let parent = tempdir("open-fail");
+        let file = parent.join("occupied");
+        std::fs::write(&file, b"a file, not a directory").unwrap();
+        let unresolvable = file.join("data");
+        assert!(
+            AuthState::load_or_create(&hash_password("pw").unwrap(), &unresolvable).is_err(),
+            "an unresolvable data dir must be an error, not a raw-path fallback"
+        );
+        let _ = std::fs::remove_dir_all(&parent);
     }
 
     /// hash_password produces a PHC verifier that accepts the original password and rejects others.
@@ -676,7 +756,7 @@ mod tests {
         let dir = tempdir("hash");
         let phc = hash_password("correct horse").unwrap();
         assert!(phc.starts_with("$argon2id$"), "expected Argon2id PHC, got: {phc}");
-        let auth = AuthState::load_or_create(&phc, &dir);
+        let auth = AuthState::load_or_create(&phc, &dir).unwrap();
         assert!(auth.verify_password("correct horse"));
         assert!(!auth.verify_password("battery staple"));
         let _ = std::fs::remove_dir_all(&dir);

@@ -41,9 +41,23 @@ pub fn load(data_dir: &Path) -> Option<PersistedAccess> {
         .filter(|p| !p.pairing_token.trim().is_empty())
 }
 
+/// Flush a file's data to disk via a write-capable handle. `File::open` would return a read-only
+/// handle, which suffices for fsync on Unix but breaks on Windows: there `sync_all` maps to
+/// `FlushFileBuffers`, which requires GENERIC_WRITE access on the handle and fails with
+/// ERROR_ACCESS_DENIED on a read-only one. Opening with `write(true)` (no truncate) does not
+/// modify the file's contents.
+fn fsync_file(path: &Path) -> std::io::Result<()> {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)?
+        .sync_all()
+}
+
 /// Atomically save pairing state: write a temp file created owner-only (0600 at open time, so the token
-/// never exists with default umask permissions), then rename over the target so a crash mid-write never
-/// leaves a truncated token file.
+/// never exists with default umask permissions), fsync it, rename it over the target, and fsync the
+/// directory. The rename alone only makes the swap atomic against a crash mid-write; without the fsyncs
+/// a power failure could promote a zero-length/partial temp file over the previous good state, or lose
+/// the renamed directory entry itself.
 pub fn save(data_dir: &Path, access: &PersistedAccess) -> Result<(), String> {
     let target = path(data_dir);
     let tmp = data_dir.join(format!("{FILENAME}.tmp"));
@@ -51,8 +65,16 @@ pub fn save(data_dir: &Path, access: &PersistedAccess) -> Result<(), String> {
         .map_err(|e| format!("failed to serialize remote-access state: {e}"))?;
     super::write_owner_only(&tmp, json.as_bytes())
         .map_err(|e| format!("failed to write remote-access state: {e}"))?;
+    // Flush the temp file's DATA to disk before the rename makes it the current state.
+    fsync_file(&tmp).map_err(|e| format!("failed to sync remote-access state: {e}"))?;
     std::fs::rename(&tmp, &target)
         .map_err(|e| format!("failed to persist remote-access state: {e}"))?;
+    // Flush the directory entry so the rename itself survives a power failure. Directories cannot be
+    // fsynced on Windows; there the durable-data rename above is the best available guarantee.
+    #[cfg(unix)]
+    std::fs::File::open(data_dir)
+        .and_then(|d| d.sync_all())
+        .map_err(|e| format!("failed to sync remote-access state directory: {e}"))?;
     Ok(())
 }
 
@@ -99,6 +121,32 @@ mod tests {
         // Valid JSON but empty token must not be treated as a usable credential.
         std::fs::write(dir.join(FILENAME), r#"{"pairingToken":"  "}"#).unwrap();
         assert!(load(&dir).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The sync step of `save` must propagate I/O errors instead of swallowing them: a state that
+    /// was never flushed must not be reported as persisted. A missing file makes the write-mode
+    /// open inside `fsync_file` fail, exercising the same `?`-propagation path `save` relies on.
+    #[test]
+    fn fsync_file_propagates_open_errors() {
+        let dir = tempdir("fsync-err");
+        let missing = dir.join("does-not-exist.tmp");
+        assert!(fsync_file(&missing).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Regression guard for the Windows fsync fix: the sync handle must be opened with WRITE
+    /// access (read-only handles fail FlushFileBuffers on Windows), and that write-mode open must
+    /// still succeed on the owner-only 0600 files `write_owner_only` produces — without altering
+    /// the file's contents.
+    #[cfg(unix)]
+    #[test]
+    fn fsync_file_works_on_owner_only_file_without_modifying_it() {
+        let dir = tempdir("fsync-0600");
+        let file = dir.join("state.tmp");
+        crate::web::write_owner_only(&file, b"payload").unwrap();
+        fsync_file(&file).unwrap();
+        assert_eq!(std::fs::read(&file).unwrap(), b"payload");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
