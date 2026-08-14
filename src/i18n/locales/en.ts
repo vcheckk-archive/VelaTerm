@@ -860,6 +860,9 @@ const en = {
   "transport.wsDisconnected": "WebSocket disconnected",
   "transport.wsConnectFailed": "WebSocket connection failed",
   "transport.cmdFailed": "Command failed",
+  "transport.remoteCmdForbidden": (cmd: string) => `Command not available to remote clients: ${cmd}`,
+  "transport.remoteSettingForbidden": (key: string) => `Settings key not writable by remote clients: ${key}`,
+  "transport.remotePathForbidden": (path: string) => `Remote clients cannot access files in the app data directory: ${path}`,
 
   // ── Crepe (built-in WYSIWYG editor UI) ──
   "crepe.placeholder": "Type text, or press / for the insert menu",

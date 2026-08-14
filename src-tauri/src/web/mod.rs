@@ -50,7 +50,9 @@ pub(crate) struct Ctx {
     pub e2ee_keys: Arc<e2ee::ServerKeys>,
     /// Serve mode used by WS to require paired encryption and reject plaintext in network-exposed LanTls mode.
     pub mode: ServeMode,
-    /// Per-instance failed-login limiter, checked before any Argon2 work on `/api/login` and the WS handshake.
+    /// Failed-login limiter, checked before any Argon2 work on `/api/login` and the WS handshake.
+    /// Shared per data directory across in-process instances (see `LoginRateLimiter::shared`), so a
+    /// dual-instance `--serve` setup cannot double the per-IP attempt budget.
     pub limiter: Arc<rate_limit::LoginRateLimiter>,
 }
 
@@ -259,7 +261,7 @@ impl WebServer {
             auth: auth.clone(),
             e2ee_keys: e2ee_keys.clone(),
             mode,
-            limiter: Arc::new(rate_limit::LoginRateLimiter::new()),
+            limiter: rate_limit::LoginRateLimiter::shared(&data_dir),
         };
         let handle = axum_server::Handle::new();
         let handle_clone = handle.clone();

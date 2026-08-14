@@ -55,12 +55,94 @@ const MANAGEMENT_CMDS: &[&str] = &[
     "network_interfaces_list",
 ];
 
+/// Commands that read or write stored secrets and are therefore gated to local origins — the class
+/// behind the protected-settings ACL, swept across every dispatch arm:
+/// - `gitea_set_config` writes the Gitea token (keyring, or the plaintext `gitea.token` app-settings
+///   fallback that `is_protected_setting` hides from remote clients — this arm bypassed that ACL).
+/// - `url_host_password` returns a remembered remote-window password from the keyring in plaintext.
+/// - `url_host_record` writes such a password into the keyring.
+/// - `ssh_host_forget` / `url_host_forget` DELETE remembered passwords from the keyring — a secret-store
+///   mutation (remote wipe of stored credentials), even though they never return a secret.
+/// Reviewed but deliberately NOT gated: `gitea_get_status` returns only `has_token`/`configured`
+/// booleans, never the token; `gitea_probe` uses a caller-supplied token, not a stored one;
+/// `land_gitea_pr` uses the stored token internally without returning it; `ssh_hosts_list` /
+/// `url_hosts_list` return host metadata with a `has_password` flag, never the secret itself.
+/// No remote UI calls the gated commands (the URL-host flows are desktop GUI-only), so gating is
+/// regression-free by construction.
+const SECRET_CMDS: &[&str] = &[
+    "gitea_set_config",
+    "url_host_password",
+    "url_host_record",
+    "ssh_host_forget",
+    "url_host_forget",
+];
+
 /// Whether an app-settings key is security-relevant and therefore hidden from and unwritable by remote
 /// clients: the `remoteAccess.*` namespace carries the Argon2id password verifier (an offline-bruteforce
 /// target) and the autostart port/enabled keys the next restart trusts; `gitea.token` is a plaintext
 /// credential fallback when no keyring is available.
 fn is_protected_setting(key: &str) -> bool {
     key.starts_with("remoteAccess.") || key == "gitea.token"
+}
+
+/// Deny remote clients direct file access inside the app data directory, which holds the secret files
+/// behind the remote-access trust model: the SQLite database (Argon2id PHC verifier, plaintext settings
+/// fallbacks), `vlx-web-access.json` (pairing token), `vlx-e2ee-key.b64`, and the TLS key. This is a
+/// narrow deny-list, not file-API sandboxing: every path outside the data directory stays allowed so
+/// legitimate remote features (doc editor, file viewer) keep working; local origins are unrestricted.
+fn guard_remote_path(app: &AppCtx, origin: CallOrigin, path: &str) -> Result<(), String> {
+    if origin != CallOrigin::Remote {
+        return Ok(());
+    }
+    let data_dir = app.data_dir()?;
+    // The data dir exists whenever a server instance runs; canonicalizing both sides makes the prefix
+    // comparison immune to symlinked temp roots (`/tmp` vs `/private/tmp` on macOS).
+    let data_dir = data_dir.canonicalize().unwrap_or(data_dir);
+    match resolve_for_acl(std::path::Path::new(path)) {
+        // Path::starts_with compares whole components, so `/data-dir-evil` never matches `/data-dir`.
+        Some(resolved) if !resolved.starts_with(&data_dir) => Ok(()),
+        // Inside the data dir, or unresolvable (nonexistent parent — the file operation itself would
+        // fail anyway): deny by default.
+        _ => Err(format!("remote_path_forbidden:{path}")),
+    }
+}
+
+/// Resolve a path for the ACL check, symlink- and traversal-safe, without requiring the target to
+/// exist: an existing target is fully canonicalized; a not-yet-existing target canonicalizes its
+/// existing parent directory (which resolves any `..` and symlinks in the directory part) and
+/// re-appends the final component; a dangling symlink's target is resolved recursively so a write
+/// through it is attributed to its real, canonicalized destination (chains of dangling links
+/// included — a raw target path would compare against the canonicalized data dir and fail open on
+/// systems with symlinked path components such as macOS `/var` → `/private/var`). Returns None when
+/// nothing can be resolved (nonexistent parent, or a symlink chain deeper than the cap) — the caller
+/// fails closed on None.
+fn resolve_for_acl(path: &std::path::Path) -> Option<std::path::PathBuf> {
+    // 8 mirrors typical kernel symlink-resolution limits; deeper chains are denied, never allowed.
+    resolve_for_acl_depth(path, 8)
+}
+
+fn resolve_for_acl_depth(path: &std::path::Path, depth: u8) -> Option<std::path::PathBuf> {
+    if depth == 0 {
+        return None;
+    }
+    if let Ok(resolved) = path.canonicalize() {
+        return Some(resolved);
+    }
+    let parent = path.parent()?;
+    let name = path.file_name()?;
+    let base = parent.canonicalize().ok()?;
+    if let Ok(target) = std::fs::read_link(path) {
+        // Dangling symlink: resolve its target relative to the canonicalized parent, then resolve
+        // the (by definition nonexistent) target itself recursively — that canonicalizes its parent
+        // and re-appends the final component, keeping both sides of the prefix comparison canonical.
+        let target = if target.is_absolute() {
+            target
+        } else {
+            base.join(target)
+        };
+        return resolve_for_acl_depth(&target, depth - 1);
+    }
+    Some(base.join(name))
 }
 
 /// Dispatch one command and return a JSON value ready for frontend serialization.
@@ -75,10 +157,13 @@ pub fn dispatch(
     source: &str,
     origin: CallOrigin,
 ) -> Result<Value, String> {
-    // Gate the management plane before any argument parsing: remote paired devices are trusted with a
-    // shell (threat model), but not with rotating/revoking the credentials that admit other devices.
-    if origin == CallOrigin::Remote && MANAGEMENT_CMDS.contains(&cmd) {
-        return Err(format!("Command not available to remote clients: {cmd}"));
+    // Gate the management plane and secret-bearing commands before any argument parsing: remote paired
+    // devices are trusted with a shell (threat model), but not with rotating/revoking the credentials
+    // that admit other devices, nor with reading/writing stored secrets. The machine-readable
+    // `code:detail` error format is mapped to a localized message in the frontend (wsClient.ts).
+    if origin == CallOrigin::Remote && (MANAGEMENT_CMDS.contains(&cmd) || SECRET_CMDS.contains(&cmd))
+    {
+        return Err(format!("remote_cmd_forbidden:{cmd}"));
     }
     match cmd {
         // ── PTY control (`pty_spawn` is handled in ws.rs) ──
@@ -155,10 +240,14 @@ pub fn dispatch(
             // New clients supply operationId for progress filtering and cancellation; generate one for old clients.
             let operation_id =
                 opt_str(args, "operationId").unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+            // Cloning creates a directory tree at a caller-chosen location; planting files inside
+            // the data dir is the same class as rename_path's `to` direction, so gate the target.
+            let parent_dir = req_str(args, "parentDir")?;
+            guard_remote_path(app, origin, &parent_dir)?;
             to_value(core::clone_project(
                 app,
                 &req_str(args, "url")?,
-                &req_str(args, "parentDir")?,
+                &parent_dir,
                 opt_str(args, "folderName").as_deref(),
                 opt_str(args, "branch").as_deref(),
                 &operation_id,
@@ -315,7 +404,7 @@ pub fn dispatch(
             // fake success while the write never happened, hiding the ACL from legitimate tooling.
             if origin == CallOrigin::Remote {
                 if let Some(key) = entries.keys().find(|k| is_protected_setting(k)) {
-                    return Err(format!("Settings key not writable by remote clients: {key}"));
+                    return Err(format!("remote_setting_forbidden:{key}"));
                 }
             }
             core::set_app_settings(app, entries)?;
@@ -335,10 +424,17 @@ pub fn dispatch(
         // ── Info panel, files, and Git ──
         "get_git_status" => to_value(git::status(&req_str(args, "path")?)),
         "git_changed_files" => to_value(git::changed_files(&req_str(args, "cwd")?)?),
-        "git_file_diff" => to_value(git::file_diff(
-            &req_str(args, "cwd")?,
-            &req_str(args, "path")?,
-        )?),
+        "git_file_diff" => {
+            // file_diff reads the worktree side with a raw fs::read of repo_top(cwd).join(path):
+            // an absolute `path` replaces the base entirely and repo_top falls back to `cwd` outside
+            // a repository, so the effective target is caller-chosen file content — gate the path
+            // actually read, exactly like the files::* content arms.
+            let cwd = req_str(args, "cwd")?;
+            let path = req_str(args, "path")?;
+            let target = git::file_diff_worktree_path(&cwd, &path);
+            guard_remote_path(app, origin, &target.to_string_lossy())?;
+            to_value(git::file_diff(&cwd, &path)?)
+        }
         "git_recent_commits" => to_value(git::recent_commits(&req_str(args, "cwd")?, 5)),
         "agent_context_info" => {
             to_value(core::agent_context_info(app, &req_str(args, "sessionId")?)?)
@@ -362,30 +458,88 @@ pub fn dispatch(
         )?),
         // Export complete session context as Markdown. Browsers omit destPath and download returned
         // content locally; core returns None after writing to disk or Some(content) for transfer.
-        "export_session_context" => to_value(core::export_session_context(
-            app,
-            &req_str(args, "sessionId")?,
-            opt_str(args, "destPath").as_deref(),
-            opt_str(args, "exportedAt").as_deref(),
-        )?),
+        "export_session_context" => {
+            // destPath is a caller-chosen write target on disk; same write class as write_text_file.
+            let dest = opt_str(args, "destPath");
+            if let Some(dest) = dest.as_deref() {
+                guard_remote_path(app, origin, dest)?;
+            }
+            to_value(core::export_session_context(
+                app,
+                &req_str(args, "sessionId")?,
+                dest.as_deref(),
+                opt_str(args, "exportedAt").as_deref(),
+            )?)
+        }
+        // Every remote-dispatchable arm that returns file CONTENT or MUTATES the filesystem at a
+        // caller-chosen path carries `guard_remote_path` (the data-dir ACL). This is no longer a
+        // hand-maintained claim: `remote_path_acl_has_no_ungated_path_arm` below mechanically
+        // enumerates every dispatch arm extracting a path-like argument and fails on any arm that is
+        // neither gated nor listed as a justified exception. Deliberately NOT gated:
+        // - `list_dir` / `stat_file`: metadata only (names, sizes, mtimes) — no content, no mutation.
+        // - `get_git_status` / `git_changed_files` / `git_recent_commits` / `git_branch_list` /
+        //   `git_merge_*` / `create_worktree` / `list_worktrees` / `commit_worktree` /
+        //   `delete_branch`: repo-scoped through git itself — they return derived metadata
+        //   (statuses, name lists, commit info, merge summaries), never raw bytes of a caller-named
+        //   file, and their mutations go through git, which refuses the non-repo data dir.
+        //   `git_file_diff` is the exception — it reads a caller-chosen file raw from the
+        //   filesystem, independent of repo status — and is therefore gated above.
+        // - `save_pasted_image`: writes only into a temp directory it picks itself — no caller path.
         "list_dir" => to_value(files::list_dir(&req_str(args, "path")?)?),
-        "read_file_preview" => to_value(files::read_preview(&req_str(args, "path")?)?),
-        "create_file" => to_value(files::create_file(&req_str(args, "path")?)?),
-        "create_dir" => to_value(files::create_dir(&req_str(args, "path")?)?),
-        "rename_path" => to_value(files::rename_path(
-            &req_str(args, "from")?,
-            &req_str(args, "to")?,
-        )?),
-        "delete_path" => to_value(files::delete_path(&req_str(args, "path")?)?),
-        "read_text_file" => to_value(files::read_text_file(&req_str(args, "path")?)?),
-        "write_text_file" => to_value(files::write_text_file(
-            &req_str(args, "path")?,
-            &req_str(args, "content")?,
-            opt_u64(args, "expectedMtimeMs"),
-        )?),
-        // Binary writes such as PDF export arrive as a numeric array and deserialize to Vec<u8>.
+        "read_file_preview" => {
+            // Returns up to 64 KB of file content — the pairing token, E2EE key, and TLS key are all
+            // NUL-free text and would round-trip through this arm in full.
+            let path = req_str(args, "path")?;
+            guard_remote_path(app, origin, &path)?;
+            to_value(files::read_preview(&path)?)
+        }
+        "create_file" => {
+            let path = req_str(args, "path")?;
+            guard_remote_path(app, origin, &path)?;
+            to_value(files::create_file(&path)?)
+        }
+        "create_dir" => {
+            let path = req_str(args, "path")?;
+            guard_remote_path(app, origin, &path)?;
+            to_value(files::create_dir(&path)?)
+        }
+        "rename_path" => {
+            // Both ends are gated: renaming a secret OUT of the data dir is a two-step exfiltration
+            // (move, then read outside), renaming INTO it plants files next to the secrets.
+            let from = req_str(args, "from")?;
+            let to = req_str(args, "to")?;
+            guard_remote_path(app, origin, &from)?;
+            guard_remote_path(app, origin, &to)?;
+            to_value(files::rename_path(&from, &to)?)
+        }
+        "delete_path" => {
+            let path = req_str(args, "path")?;
+            guard_remote_path(app, origin, &path)?;
+            to_value(files::delete_path(&path)?)
+        }
+        // The generic full-content read/write arms are the ones that could hand a remote client the
+        // secret files in the data directory (DB with the PHC verifier, pairing/E2EE/TLS keys), so they
+        // carry the data-dir ACL; all other paths behave exactly as before.
+        "read_text_file" => {
+            let path = req_str(args, "path")?;
+            guard_remote_path(app, origin, &path)?;
+            to_value(files::read_text_file(&path)?)
+        }
+        "write_text_file" => {
+            let path = req_str(args, "path")?;
+            guard_remote_path(app, origin, &path)?;
+            to_value(files::write_text_file(
+                &path,
+                &req_str(args, "content")?,
+                opt_u64(args, "expectedMtimeMs"),
+            )?)
+        }
+        // Binary writes such as PDF export arrive as a numeric array and deserialize to Vec<u8>. Same
+        // write class as write_text_file, so it carries the same remote data-dir ACL.
         "write_bytes_file" => {
-            files::write_bytes(&req_str(args, "path")?, &req_kind::<Vec<u8>>(args, "data")?)?;
+            let path = req_str(args, "path")?;
+            guard_remote_path(app, origin, &path)?;
+            files::write_bytes(&path, &req_kind::<Vec<u8>>(args, "data")?)?;
             Ok(Value::Null)
         }
         // Browser/remote image paste sends base64 bytes and an extension, saves to a temporary directory,
@@ -398,17 +552,26 @@ pub fn dispatch(
         )?),
         // Document-editor images persist beside the document under assets/, returning a relative Markdown
         // path. Electron, browser, and remote windows use this authenticated and optionally encrypted call.
-        "save_doc_image" => to_value(files::save_doc_image(
-            &req_str(args, "docPath")?,
-            &b64_bytes(args, "bytesB64")?,
-            &req_str(args, "ext")?,
-        )?),
+        "save_doc_image" => {
+            // Writes into `<docPath parent>/assets/` — a caller-chosen location, same write class.
+            let doc_path = req_str(args, "docPath")?;
+            guard_remote_path(app, origin, &doc_path)?;
+            to_value(files::save_doc_image(
+                &doc_path,
+                &b64_bytes(args, "bytesB64")?,
+                &req_str(args, "ext")?,
+            )?)
+        }
         "stat_file" => to_value(files::stat_file(&req_str(args, "path")?)?),
-        "read_file_base64" => to_value(files::read_file_base64(
-            &req_str(args, "path")?,
-            req_u64(args, "offset")?,
-            req_u64(args, "maxLen")?,
-        )?),
+        "read_file_base64" => {
+            let path = req_str(args, "path")?;
+            guard_remote_path(app, origin, &path)?;
+            to_value(files::read_file_base64(
+                &path,
+                req_u64(args, "offset")?,
+                req_u64(args, "maxLen")?,
+            )?)
+        }
         "process_stats" => {
             let pid = args
                 .get("pid")
@@ -426,7 +589,10 @@ pub fn dispatch(
             &req_str(args, "sessionId")?,
         )?),
         "remove_worktree" => {
-            git::worktree_remove(&req_str(args, "path")?, req_bool(args, "force")?)?;
+            // Deletes a directory tree at a caller-chosen path; gated like the other mutating arms.
+            let path = req_str(args, "path")?;
+            guard_remote_path(app, origin, &path)?;
+            git::worktree_remove(&path, req_bool(args, "force")?)?;
             Ok(Value::Null)
         }
         "commit_worktree" => {
@@ -627,7 +793,7 @@ fn req_kind<T: serde::de::DeserializeOwned>(args: &Value, key: &str) -> Result<T
 
 #[cfg(test)]
 mod tests {
-    use super::{dispatch, CallOrigin, MANAGEMENT_CMDS};
+    use super::{dispatch, CallOrigin, MANAGEMENT_CMDS, SECRET_CMDS};
     use crate::host::{AppCtx, HeadlessHost};
     use crate::pty::manager::DESKTOP_SOURCE;
     use serde_json::{json, Value};
@@ -859,8 +1025,585 @@ mod tests {
             let err = dispatch(&app, cmd, &args, "ws-1", CallOrigin::Remote).unwrap_err();
             assert_eq!(
                 err,
-                format!("Command not available to remote clients: {cmd}"),
+                format!("remote_cmd_forbidden:{cmd}"),
                 "{cmd} must be gated for remote origins"
+            );
+        }
+    }
+
+    /// Secret-bearing commands (the class behind the settings ACL) are rejected for remote origins
+    /// before any argument parsing, while local origins keep them working. The set is pinned literally
+    /// for the same reason as EXPECTED_GATED above: shrinking SECRET_CMDS must fail here first.
+    #[test]
+    fn secret_commands_are_gated_for_remote_origin() {
+        let app = test_ctx();
+        const EXPECTED_SECRET: &[&str] = &[
+            "gitea_set_config",
+            "url_host_password",
+            "url_host_record",
+            "ssh_host_forget",
+            "url_host_forget",
+        ];
+        assert_eq!(
+            SECRET_CMDS, EXPECTED_SECRET,
+            "SECRET_CMDS changed: removing a command lets remote clients read or write stored secrets — \
+             update this pinned list only together with a deliberate security review"
+        );
+        let args = json!({
+            "baseUrl": "http://gitea.local", "token": "secret", "url": "http://h:1",
+            "remember": false, "target": "user@host"
+        });
+        for cmd in EXPECTED_SECRET {
+            let err = dispatch(&app, cmd, &args, "ws-1", CallOrigin::Remote).unwrap_err();
+            assert_eq!(
+                err,
+                format!("remote_cmd_forbidden:{cmd}"),
+                "{cmd} must be gated for remote origins"
+            );
+        }
+    }
+
+    /// The local lane keeps working for every newly gated secret command: gitea_set_config reaches core
+    /// (an empty token skips keyring writes and only persists the base URL — tests must not touch the
+    /// real keyring), and the GUI-only URL-host commands reach core as well.
+    #[test]
+    fn secret_commands_keep_working_for_local_origin() {
+        let app = test_ctx();
+        let status = dispatch(
+            &app,
+            "gitea_set_config",
+            &json!({ "baseUrl": "http://gitea.local", "token": "" }),
+            DESKTOP_SOURCE,
+            CallOrigin::Local,
+        )
+        .expect("local gitea_set_config must reach core");
+        assert_eq!(status["hasToken"], json!(false));
+
+        #[cfg(feature = "gui")]
+        {
+            // No password is stored for this URL, so core returns None (Null) — but the call reaches core.
+            let pw = dispatch(
+                &app,
+                "url_host_password",
+                &json!({ "url": "http://127.0.0.1:9999/#pair=x" }),
+                DESKTOP_SOURCE,
+                CallOrigin::Local,
+            )
+            .expect("local url_host_password must reach core");
+            assert_eq!(pw, Value::Null);
+
+            // remember=false records the host without touching stored passwords beyond a no-op delete.
+            dispatch(
+                &app,
+                "url_host_record",
+                &json!({ "url": "http://127.0.0.1:9999/#pair=x", "remember": false }),
+                DESKTOP_SOURCE,
+                CallOrigin::Local,
+            )
+            .expect("local url_host_record must reach core");
+
+            // The forget commands stay usable locally: deleting an unknown host is a no-op delete in
+            // the keyring plus a DB row delete, so the calls reach core without side effects.
+            dispatch(
+                &app,
+                "ssh_host_forget",
+                &json!({ "target": "nobody@nowhere.example" }),
+                DESKTOP_SOURCE,
+                CallOrigin::Local,
+            )
+            .expect("local ssh_host_forget must reach core");
+            dispatch(
+                &app,
+                "url_host_forget",
+                &json!({ "url": "http://127.0.0.1:9999/#pair=x" }),
+                DESKTOP_SOURCE,
+                CallOrigin::Local,
+            )
+            .expect("local url_host_forget must reach core");
+        }
+    }
+
+    /// FIX for the named residual risk: remote clients must not read or write files inside the data
+    /// directory (DB with PHC verifier, vlx-web-access.json, vlx-e2ee-key.b64, TLS key) through the
+    /// generic file arms — while paths outside the data dir stay fully usable remotely (doc editor,
+    /// file viewer) and local origins stay unrestricted even inside the data dir.
+    #[test]
+    fn remote_file_access_to_data_dir_is_denied() {
+        let app = test_ctx();
+        let data_dir = app.data_dir().unwrap();
+        let secret = data_dir.join("vlx-web-access.json");
+        std::fs::write(&secret, b"{\"pairing_token\":\"top-secret\"}").unwrap();
+        let secret_str = secret.to_string_lossy().to_string();
+
+        // Remote read of a data-dir file is denied with the stable code, for both read arms.
+        for cmd in ["read_text_file", "read_file_base64"] {
+            let err = dispatch(
+                &app,
+                cmd,
+                &json!({ "path": secret_str, "offset": 0, "maxLen": 64 }),
+                "ws-1",
+                CallOrigin::Remote,
+            )
+            .unwrap_err();
+            assert_eq!(err, format!("remote_path_forbidden:{secret_str}"), "{cmd} must deny data-dir reads");
+        }
+
+        // Remote writes into the data dir are denied — including a not-yet-existing target (the parent
+        // directory resolves) and the binary write arm.
+        let new_target = data_dir.join("planted.txt");
+        let new_target_str = new_target.to_string_lossy().to_string();
+        let err = dispatch(
+            &app,
+            "write_text_file",
+            &json!({ "path": new_target_str, "content": "x" }),
+            "ws-1",
+            CallOrigin::Remote,
+        )
+        .unwrap_err();
+        assert_eq!(err, format!("remote_path_forbidden:{new_target_str}"));
+        let err = dispatch(
+            &app,
+            "write_bytes_file",
+            &json!({ "path": secret_str, "data": [1, 2, 3] }),
+            "ws-1",
+            CallOrigin::Remote,
+        )
+        .unwrap_err();
+        assert_eq!(err, format!("remote_path_forbidden:{secret_str}"));
+        assert!(!new_target.exists(), "a denied write must not create the file");
+
+        // Traversal into the data dir is resolved before the check: a path that leaves and re-enters
+        // through `..` is still denied.
+        let dodged = format!(
+            "{}/../{}/vlx-web-access.json",
+            data_dir.to_string_lossy(),
+            data_dir.file_name().unwrap().to_string_lossy()
+        );
+        let err = dispatch(
+            &app,
+            "read_text_file",
+            &json!({ "path": dodged }),
+            "ws-1",
+            CallOrigin::Remote,
+        )
+        .unwrap_err();
+        assert_eq!(err, format!("remote_path_forbidden:{dodged}"));
+
+        // A symlink outside the data dir pointing into it is resolved and denied (unix only).
+        #[cfg(unix)]
+        {
+            let outside = std::env::temp_dir().join(format!("vlx-acl-link-{}", uuid::Uuid::new_v4()));
+            std::os::unix::fs::symlink(&secret, &outside).unwrap();
+            let outside_str = outside.to_string_lossy().to_string();
+            let err = dispatch(
+                &app,
+                "read_text_file",
+                &json!({ "path": outside_str }),
+                "ws-1",
+                CallOrigin::Remote,
+            )
+            .unwrap_err();
+            assert_eq!(err, format!("remote_path_forbidden:{outside_str}"));
+            let _ = std::fs::remove_file(&outside);
+        }
+
+        // A normal path outside the data dir stays readable and writable for remote clients.
+        let project = std::env::temp_dir().join(format!("vlx-acl-proj-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&project).unwrap();
+        let doc = project.join("notes.md");
+        std::fs::write(&doc, b"hello remote").unwrap();
+        let doc_str = doc.to_string_lossy().to_string();
+        let read = dispatch(
+            &app,
+            "read_text_file",
+            &json!({ "path": doc_str }),
+            "ws-1",
+            CallOrigin::Remote,
+        )
+        .expect("remote read outside the data dir must keep working");
+        assert_eq!(read["content"], json!("hello remote"));
+        dispatch(
+            &app,
+            "write_text_file",
+            &json!({ "path": doc_str, "content": "edited remotely" }),
+            "ws-1",
+            CallOrigin::Remote,
+        )
+        .expect("remote write outside the data dir must keep working");
+        assert_eq!(std::fs::read_to_string(&doc).unwrap(), "edited remotely");
+
+        // Local origins (desktop and Electron loopback) stay unrestricted inside the data dir.
+        let read = dispatch(
+            &app,
+            "read_text_file",
+            &json!({ "path": secret_str }),
+            DESKTOP_SOURCE,
+            CallOrigin::Local,
+        )
+        .expect("local read of data-dir files must stay allowed");
+        assert_eq!(read["content"], json!("{\"pairing_token\":\"top-secret\"}"));
+
+        let _ = std::fs::remove_dir_all(&project);
+    }
+
+    /// Hardening for the two `resolve_for_acl` branches the main ACL test does not reach:
+    /// (1) the `read_link` branch — a dangling symlink outside the data dir pointing at a
+    /// not-yet-existing target inside it must be attributed to its real target and denied, otherwise
+    /// a remote client plants the link and writes the secret file through it; (2) the deny-by-default
+    /// branch — a path whose parent does not exist resolves to None and is denied for remote origins
+    /// even though it lies outside the data dir (the file operation would fail anyway; failing closed
+    /// costs no legitimate feature).
+    #[test]
+    fn remote_path_acl_resolves_dangling_symlinks_and_denies_unresolvable_paths() {
+        let app = test_ctx();
+        let data_dir = app.data_dir().unwrap();
+
+        #[cfg(unix)]
+        {
+            // Dangling symlink: target inside the data dir does NOT exist, so canonicalize() fails on
+            // both the link and the target — only the read_link branch can catch this.
+            let target = data_dir.join("planted-via-dangling-link.json");
+            assert!(!target.exists());
+            let link = std::env::temp_dir().join(format!("vlx-acl-dangling-{}", uuid::Uuid::new_v4()));
+            std::os::unix::fs::symlink(&target, &link).unwrap();
+            let link_str = link.to_string_lossy().to_string();
+            let err = dispatch(
+                &app,
+                "write_text_file",
+                &json!({ "path": link_str, "content": "planted" }),
+                "ws-1",
+                CallOrigin::Remote,
+            )
+            .unwrap_err();
+            assert_eq!(
+                err,
+                format!("remote_path_forbidden:{link_str}"),
+                "a dangling symlink into the data dir must be denied for remote writes"
+            );
+            assert!(!target.exists(), "the denied write must not create the target");
+            let _ = std::fs::remove_file(&link);
+        }
+
+        // Deny-by-default: nonexistent parent directory → resolve_for_acl returns None → denied for
+        // remote even outside the data dir.
+        let unresolvable = std::env::temp_dir()
+            .join(format!("vlx-acl-missing-parent-{}", uuid::Uuid::new_v4()))
+            .join("file.txt");
+        let unresolvable_str = unresolvable.to_string_lossy().to_string();
+        let err = dispatch(
+            &app,
+            "write_text_file",
+            &json!({ "path": unresolvable_str, "content": "x" }),
+            "ws-1",
+            CallOrigin::Remote,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            format!("remote_path_forbidden:{unresolvable_str}"),
+            "an unresolvable path (missing parent) must fail closed for remote origins"
+        );
+
+        // Chain of dangling symlinks (link → link → data-dir target): read_link only unwraps one
+        // level, so only the recursive resolution attributes the write to the data dir.
+        #[cfg(unix)]
+        {
+            let target = data_dir.join("planted-via-chain.json");
+            assert!(!target.exists());
+            let inner = std::env::temp_dir().join(format!("vlx-acl-chain-b-{}", uuid::Uuid::new_v4()));
+            let outer = std::env::temp_dir().join(format!("vlx-acl-chain-a-{}", uuid::Uuid::new_v4()));
+            std::os::unix::fs::symlink(&target, &inner).unwrap();
+            std::os::unix::fs::symlink(&inner, &outer).unwrap();
+            let outer_str = outer.to_string_lossy().to_string();
+            let err = dispatch(
+                &app,
+                "write_text_file",
+                &json!({ "path": outer_str, "content": "planted" }),
+                "ws-1",
+                CallOrigin::Remote,
+            )
+            .unwrap_err();
+            assert_eq!(
+                err,
+                format!("remote_path_forbidden:{outer_str}"),
+                "a chain of dangling symlinks into the data dir must be denied"
+            );
+            assert!(!target.exists(), "the denied write must not create the target");
+            let _ = std::fs::remove_file(&outer);
+            let _ = std::fs::remove_file(&inner);
+        }
+    }
+
+    /// Class regression for the FIX-5 sweep: EVERY remote-dispatchable arm that returns file content
+    /// or mutates the filesystem at a caller-chosen path is denied inside the data dir, keeps working
+    /// on normal paths remotely, and stays unrestricted for local origins. `list_dir`/`stat_file`
+    /// stay ungated by design (metadata only) — asserted here so a future content-returning change
+    /// to them shows up as a conscious decision, not an accident.
+    #[test]
+    fn remote_data_dir_acl_covers_all_content_and_mutation_arms() {
+        let app = test_ctx();
+        let data_dir = app.data_dir().unwrap();
+        let secret = data_dir.join("vlx-web-access.json");
+        std::fs::write(&secret, b"{\"pairing_token\":\"top-secret\"}").unwrap();
+        let secret_str = secret.to_string_lossy().to_string();
+        let dd = data_dir.to_string_lossy().to_string();
+
+        // (cmd, args) pairs that must be denied for Remote with the stable code on the offending path.
+        let denied: Vec<(&str, Value, String)> = vec![
+            ("read_file_preview", json!({ "path": secret_str }), secret_str.clone()),
+            ("create_file", json!({ "path": format!("{dd}/planted.txt") }), format!("{dd}/planted.txt")),
+            ("create_dir", json!({ "path": format!("{dd}/planted-dir") }), format!("{dd}/planted-dir")),
+            // Exfil direction: move the secret out of the data dir, then read it outside.
+            ("rename_path", json!({ "from": secret_str, "to": format!("{}/exfil.json", std::env::temp_dir().to_string_lossy()) }), secret_str.clone()),
+            // Planting direction: move a file into the data dir (`from` is outside and passes; the
+            // guard on `to` denies).
+            ("rename_path", json!({ "from": format!("{}/nonexistent-src.txt", std::env::temp_dir().to_string_lossy()), "to": format!("{dd}/planted.txt") }), format!("{dd}/planted.txt")),
+            ("delete_path", json!({ "path": secret_str }), secret_str.clone()),
+            ("save_doc_image", json!({ "docPath": format!("{dd}/doc.md"), "bytesB64": "aGk=", "ext": "png" }), format!("{dd}/doc.md")),
+            ("remove_worktree", json!({ "path": dd.clone(), "force": true }), dd.clone()),
+            ("export_session_context", json!({ "sessionId": "no-such-session", "destPath": format!("{dd}/export.md") }), format!("{dd}/export.md")),
+            // git_file_diff reads the worktree side with a raw fs::read of repo_top(cwd).join(path):
+            // an absolute path replaces the base and repo_top falls back to cwd outside a repo, so
+            // {cwd:"/", path:<secret>} would return the secret in `modified` without the gate.
+            ("git_file_diff", json!({ "cwd": "/", "path": secret_str }), secret_str.clone()),
+        ];
+        for (cmd, args, path) in &denied {
+            let err = dispatch(&app, cmd, args, "ws-1", CallOrigin::Remote).unwrap_err();
+            assert_eq!(
+                err,
+                format!("remote_path_forbidden:{path}"),
+                "{cmd} must deny remote access inside the data dir"
+            );
+        }
+        assert!(secret.exists(), "the secret must survive the denied mutations");
+        assert!(!data_dir.join("planted.txt").exists());
+        assert!(!data_dir.join("planted-dir").exists());
+
+        // Outside the data dir the same arms keep working remotely (doc editor / file viewer).
+        let project = std::env::temp_dir().join(format!("vlx-acl-arms-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&project).unwrap();
+        let doc = project.join("notes.md");
+        std::fs::write(&doc, b"hello").unwrap();
+        let doc_str = doc.to_string_lossy().to_string();
+        let preview = dispatch(
+            &app,
+            "read_file_preview",
+            &json!({ "path": doc_str }),
+            "ws-1",
+            CallOrigin::Remote,
+        )
+        .expect("remote preview outside the data dir must keep working");
+        assert_eq!(preview["content"], json!("hello"));
+        let renamed = project.join("renamed.md");
+        dispatch(
+            &app,
+            "rename_path",
+            &json!({ "from": doc_str, "to": renamed.to_string_lossy() }),
+            "ws-1",
+            CallOrigin::Remote,
+        )
+        .expect("remote rename outside the data dir must keep working");
+        assert!(renamed.exists());
+
+        // Local origin stays unrestricted inside the data dir (desktop and Electron loopback).
+        let preview = dispatch(
+            &app,
+            "read_file_preview",
+            &json!({ "path": secret_str }),
+            DESKTOP_SOURCE,
+            CallOrigin::Local,
+        )
+        .expect("local preview of data-dir files must stay allowed");
+        assert_eq!(preview["content"], json!("{\"pairing_token\":\"top-secret\"}"));
+
+        let _ = std::fs::remove_dir_all(&project);
+    }
+
+    /// FIX-5 regression for the git lane: git_file_diff is gated on the effective worktree path it
+    /// reads (repo_top(cwd).join(path)), so a remote client cannot pull data-dir secrets through the
+    /// diff viewer — while diffs on normal paths keep working remotely and local origins stay
+    /// unrestricted even inside the data dir.
+    #[test]
+    fn git_file_diff_is_gated_on_its_effective_path() {
+        let app = test_ctx();
+        let data_dir = app.data_dir().unwrap();
+        let secret = data_dir.join("vlx-web-access.json");
+        std::fs::write(&secret, b"{\"pairing_token\":\"top-secret\"}").unwrap();
+        let secret_str = secret.to_string_lossy().to_string();
+
+        // Remote + absolute secret path (Path::join replaces the base; "/" is not a repository, so
+        // repo_top falls back to cwd): denied with the stable code on the effective target.
+        let err = dispatch(
+            &app,
+            "git_file_diff",
+            &json!({ "cwd": "/", "path": secret_str }),
+            "ws-1",
+            CallOrigin::Remote,
+        )
+        .unwrap_err();
+        assert_eq!(err, format!("remote_path_forbidden:{secret_str}"));
+
+        // Remote + relative path with cwd inside the data dir (the repo_top fallback lane): denied.
+        let err = dispatch(
+            &app,
+            "git_file_diff",
+            &json!({ "cwd": data_dir.to_string_lossy(), "path": "vlx-web-access.json" }),
+            "ws-1",
+            CallOrigin::Remote,
+        )
+        .unwrap_err();
+        assert!(
+            err.starts_with("remote_path_forbidden:"),
+            "relative data-dir diff must be denied, got: {err}"
+        );
+
+        // Remote + normal project path stays usable (the ChangesModal diff viewer): outside a repo
+        // file_diff still returns the worktree side, which is exactly the behavior to preserve.
+        let project = std::env::temp_dir().join(format!("vlx-acl-diff-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join("notes.md"), b"hello diff").unwrap();
+        let diff = dispatch(
+            &app,
+            "git_file_diff",
+            &json!({ "cwd": project.to_string_lossy(), "path": "notes.md" }),
+            "ws-1",
+            CallOrigin::Remote,
+        )
+        .expect("remote git_file_diff outside the data dir must keep working");
+        assert_eq!(diff["modified"], json!("hello diff"));
+
+        // Local origin stays unrestricted inside the data dir.
+        let diff = dispatch(
+            &app,
+            "git_file_diff",
+            &json!({ "cwd": data_dir.to_string_lossy(), "path": "vlx-web-access.json" }),
+            DESKTOP_SOURCE,
+            CallOrigin::Local,
+        )
+        .expect("local git_file_diff inside the data dir must stay allowed");
+        assert_eq!(diff["modified"], json!("{\"pairing_token\":\"top-secret\"}"));
+
+        let _ = std::fs::remove_dir_all(&project);
+    }
+
+    /// Structural chokepoint for the FIX-5 class (the sweep completeness was claimed twice by prose
+    /// and twice wrong: read_file_preview in round 0, git_file_diff in round 1). This test parses the
+    /// REAL dispatch source: every match arm that extracts a caller-chosen path-like argument must
+    /// either call `guard_remote_path` in its own body or be listed here as a justified exception.
+    /// Adding a new path-taking arm without a gate — or gating an arm the exception list still
+    /// claims is ungated — fails this test, so completeness is enforced mechanically, not asserted
+    /// in comments. Limits: it covers arms in THIS file keyed by the known path-argument names below;
+    /// a path smuggled through a differently named argument or a command dispatched outside this
+    /// match (pty_spawn in ws.rs) is out of its reach and stays on the reviewer.
+    #[test]
+    fn remote_path_acl_has_no_ungated_path_arm() {
+        const SRC: &str = include_str!("dispatch.rs");
+        // Only the production half of the file: everything before the test module.
+        let prod = SRC.split("#[cfg(test)]").next().unwrap();
+
+        // Argument keys that carry a caller-chosen filesystem path anywhere in this dispatch match.
+        // The trailing `)` distinguishes e.g. `args, "to")` from `args, "token")`.
+        const PATH_KEYS: &[&str] = &[
+            "args, \"path\")",
+            "args, \"cwd\")",
+            "args, \"from\")",
+            "args, \"to\")",
+            "args, \"destPath\")",
+            "args, \"docPath\")",
+            "args, \"repoRoot\")",
+            "args, \"wtPath\")",
+            "args, \"repo\")",
+            "args, \"parentDir\")",
+            "args, \"worktreePath\")",
+        ];
+        // Deliberately ungated path-taking arms, each with its standing justification (mirrors the
+        // sweep comment at the file arms): metadata-only, or repo-scoped through git itself — never
+        // raw bytes of a caller-named file, mutations refused by git on the non-repo data dir.
+        const UNGATED_JUSTIFIED: &[&str] = &[
+            "list_dir",        // metadata only (names, sizes, mtimes)
+            "stat_file",       // metadata only
+            "get_git_status",  // derived repo status, no file content
+            "git_changed_files",
+            "git_recent_commits",
+            "git_branch_list",
+            "git_merge_preview", // diff_stat summary, no raw file bytes
+            "git_merge_apply",   // git-mediated mutation, refused outside a repository
+            "create_worktree",   // git-mediated, refused outside a repository
+            "list_worktrees",
+            "commit_worktree",   // git-mediated mutation, refused outside a repository
+            "delete_branch",
+            // Session-tree metadata arms: `cwd`/`worktreePath` only choose where a PTY spawns; the
+            // arms read and write no file content, and a remote paired device is trusted with a
+            // shell in any directory by the threat model anyway.
+            "create_group",
+            "create_session",
+            "persist_session",
+            "update_session",
+        ];
+
+        // Split the source into (arm name, arm body) pairs: an arm starts at a line whose trimmed
+        // form is `"name" => ...`; everything up to the next such line belongs to its body. Comment
+        // lines are skipped so prose mentioning guard_remote_path can never satisfy the check.
+        let mut arms: Vec<(String, String)> = Vec::new();
+        for line in prod.lines() {
+            let t = line.trim_start();
+            if t.starts_with("//") {
+                continue;
+            }
+            let is_arm_start = t
+                .strip_prefix('"')
+                .and_then(|rest| rest.split_once('"'))
+                .map(|(name, after)| {
+                    after.trim_start().starts_with("=>")
+                        && name
+                            .chars()
+                            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+                })
+                .unwrap_or(false);
+            if is_arm_start {
+                let name = t[1..].split('"').next().unwrap().to_string();
+                arms.push((name, String::new()));
+            }
+            if let Some((_, body)) = arms.last_mut() {
+                body.push_str(line);
+                body.push('\n');
+            }
+        }
+        assert!(
+            arms.len() > 50,
+            "the arm parser no longer sees the dispatch match (found {} arms) — fix the parser, \
+             do not delete this chokepoint",
+            arms.len()
+        );
+
+        for (name, body) in &arms {
+            if !PATH_KEYS.iter().any(|k| body.contains(k)) {
+                continue;
+            }
+            let gated = body.contains("guard_remote_path");
+            let excepted = UNGATED_JUSTIFIED.contains(&name.as_str());
+            assert!(
+                gated || excepted,
+                "dispatch arm `{name}` extracts a caller-chosen path but neither calls \
+                 guard_remote_path nor is a justified exception — gate it or add it to \
+                 UNGATED_JUSTIFIED with a reviewed reason"
+            );
+            assert!(
+                !(gated && excepted),
+                "dispatch arm `{name}` is gated but still listed in UNGATED_JUSTIFIED — remove the \
+                 stale exception so the list stays accurate"
+            );
+        }
+        // Every exception must still exist as a path-taking arm, so the list cannot rot.
+        for name in UNGATED_JUSTIFIED {
+            let arm = arms.iter().find(|(n, _)| n == name);
+            let takes_path = arm
+                .map(|(_, body)| PATH_KEYS.iter().any(|k| body.contains(k)))
+                .unwrap_or(false);
+            assert!(
+                takes_path,
+                "UNGATED_JUSTIFIED entry `{name}` is not a path-taking dispatch arm (anymore) — \
+                 remove or fix the entry"
             );
         }
     }
@@ -922,7 +1665,7 @@ mod tests {
             CallOrigin::Remote,
         )
         .unwrap_err();
-        assert_eq!(err, "Settings key not writable by remote clients: remoteAccess.port");
+        assert_eq!(err, "remote_setting_forbidden:remoteAccess.port");
         let settings = crate::command_core::get_app_settings(&app).unwrap();
         assert!(settings.get("remoteAccess.port").is_none(), "rejected write must not persist");
         assert!(settings.get("vlx-theme").is_none(), "a rejected batch must persist nothing");
@@ -936,7 +1679,7 @@ mod tests {
             CallOrigin::Remote,
         )
         .unwrap_err();
-        assert_eq!(err, "Settings key not writable by remote clients: gitea.token");
+        assert_eq!(err, "remote_setting_forbidden:gitea.token");
 
         // Unprotected remote writes still work.
         dispatch(

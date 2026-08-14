@@ -1655,17 +1655,24 @@ fn git_show_bytes(cwd: &str, spec: &str) -> Option<Vec<u8>> {
     Some(out.stdout)
 }
 
+/// The filesystem path `file_diff` reads for the worktree side: `repo_top(cwd)` joined with `path`.
+/// Callers that enforce access control (the remote data-dir ACL in web dispatch) must gate THIS path,
+/// not the raw arguments: `Path::join` replaces the base entirely for an absolute `path`, and
+/// `repo_top` falls back to `cwd` outside a repository, so the effective target is caller-chosen.
+pub fn file_diff_worktree_path(cwd: &str, path: &str) -> std::path::PathBuf {
+    std::path::Path::new(&repo_top(cwd)).join(path)
+}
+
 /// Return HEAD/worktree text for one file. Added/untracked has no original; deleted has no modified.
 /// If either side is binary/oversized, set binary and leave both strings empty.
 pub fn file_diff(cwd: &str, path: &str) -> Result<FileDiff, String> {
     if cwd.trim().is_empty() || path.trim().is_empty() {
         return Err("Missing working directory or path".into());
     }
-    let top = repo_top(cwd);
     // HEAD side via `git show HEAD:<path>`; added/untracked files have no object.
     let original_bytes = git_show_bytes(cwd, &format!("HEAD:{path}"));
     // Worktree side reads the repository file; deleted files are absent.
-    let work_path = std::path::Path::new(&top).join(path);
+    let work_path = file_diff_worktree_path(cwd, path);
     let modified_bytes = std::fs::read(&work_path).ok();
 
     let orig_bin = original_bytes

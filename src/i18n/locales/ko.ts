@@ -823,6 +823,9 @@ const ko: typeof en = {
   "transport.wsDisconnected": "WebSocket 연결이 끊어졌습니다", // WebSocket disconnected
   "transport.wsConnectFailed": "WebSocket 연결 실패", // WebSocket connection failed
   "transport.cmdFailed": "명령 실패", // Command failed
+  "transport.remoteCmdForbidden": (cmd: string) => `원격 클라이언트에서 사용할 수 없는 명령입니다: ${cmd}`, // Command not available to remote clients
+  "transport.remoteSettingForbidden": (key: string) => `원격 클라이언트가 쓸 수 없는 설정 키입니다: ${key}`, // Settings key not writable by remote clients
+  "transport.remotePathForbidden": (path: string) => `원격 클라이언트는 앱 데이터 디렉터리의 파일에 접근할 수 없습니다: ${path}`, // Remote clients cannot access files in the app data directory
 
   // ── Crepe（위지윅 편집기 내장 UI）──
   "crepe.placeholder": "본문을 입력하거나 / 로 삽입 메뉴를 여세요", // Type text, or press / for the insert menu

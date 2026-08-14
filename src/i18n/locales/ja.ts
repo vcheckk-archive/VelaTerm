@@ -826,6 +826,9 @@ const ja: typeof en = {
   "transport.wsDisconnected": "WebSocket が切断されました", // WebSocket disconnected
   "transport.wsConnectFailed": "WebSocket 接続に失敗しました", // WebSocket connection failed
   "transport.cmdFailed": "コマンドが失敗しました", // Command failed
+  "transport.remoteCmdForbidden": (cmd: string) => `このコマンドはリモートクライアントでは利用できません: ${cmd}`, // Command not available to remote clients
+  "transport.remoteSettingForbidden": (key: string) => `この設定キーはリモートクライアントからは書き込めません: ${key}`, // Settings key not writable by remote clients
+  "transport.remotePathForbidden": (path: string) => `リモートクライアントはアプリのデータディレクトリ内のファイルにアクセスできません: ${path}`, // Remote clients cannot access files in the app data directory
 
   // ── Crepe (built-in WYSIWYG editor UI) ──
   "crepe.placeholder": "本文を入力するか、/ で挿入メニューを開きます", // Type text, or press / for the insert menu

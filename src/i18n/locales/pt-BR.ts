@@ -836,6 +836,9 @@ const ptBR: typeof en = {
   "transport.wsDisconnected": "WebSocket desconectado", // WebSocket disconnected
   "transport.wsConnectFailed": "Falha na conexão WebSocket", // WebSocket connection failed
   "transport.cmdFailed": "O comando falhou", // Command failed
+  "transport.remoteCmdForbidden": (cmd: string) => `Comando não disponível para clientes remotos: ${cmd}`, // Command not available to remote clients
+  "transport.remoteSettingForbidden": (key: string) => `Chave de configuração não gravável por clientes remotos: ${key}`, // Settings key not writable by remote clients
+  "transport.remotePathForbidden": (path: string) => `Clientes remotos não podem acessar arquivos no diretório de dados do aplicativo: ${path}`, // Remote clients cannot access files in the app data directory
 
   // ── Crepe（editor WYSIWYG）──
   "crepe.placeholder": "Digite texto ou pressione / para o menu de inserção", // Type text, or press / for the insert menu

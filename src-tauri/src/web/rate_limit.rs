@@ -4,15 +4,20 @@
 //! without credentials, so they form a DoS-amplification primitive: each request costs the server a
 //! memory-hard hash. Two independent brakes contain that:
 //!
-//! - [`LoginRateLimiter`]: a per-IP fixed window of failed attempts. A blocked IP is rejected before any
+//! - [`LoginRateLimiter`]: a per-IP fixed window of login attempts. A blocked IP is rejected before any
 //!   Argon2 work happens. The limiter is in-memory by design — a restart resets it, which is acceptable
-//!   because the pairing token plus Argon2 remain as the actual credential barrier.
+//!   because the pairing token plus Argon2 remain as the actual credential barrier. One limiter is
+//!   shared per data directory across every in-process server instance (see [`LoginRateLimiter::shared`],
+//!   the `PAIRING_STORES` pattern from auth.rs), so a dual-instance `--serve` setup no longer doubles an
+//!   attacker's budget. [`allow`](LoginRateLimiter::allow) *reserves* an attempt atomically, so N
+//!   parallel requests from one IP cannot slip under the limit before any of them records a failure.
 //! - [`VERIFY_SEMAPHORE`]: a process-wide cap on concurrent Argon2 verifications, combined with
 //!   `spawn_blocking` in `AuthState::verify_password_async` so the async executor is never blocked.
 
 use std::collections::HashMap;
 use std::net::IpAddr;
-use std::sync::Mutex;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
 use tokio::sync::Semaphore;
@@ -27,7 +32,7 @@ const WINDOW: Duration = Duration::from_secs(60);
 /// with memory-hard hashing.
 pub static VERIFY_SEMAPHORE: Semaphore = Semaphore::const_new(2);
 
-/// Per-IP failed-login window. All mutating accesses prune expired entries so the map cannot grow
+/// Per-IP login-attempt window. All mutating accesses prune expired entries so the map cannot grow
 /// unboundedly under a spread of source addresses.
 pub struct LoginRateLimiter {
     entries: Mutex<HashMap<IpAddr, WindowEntry>>,
@@ -35,8 +40,19 @@ pub struct LoginRateLimiter {
 
 struct WindowEntry {
     window_start: Instant,
+    /// Completed failed attempts within this window.
     failures: u32,
+    /// Attempts reserved by [`LoginRateLimiter::allow`] whose outcome is still pending. Counted
+    /// against the limit so parallel requests from one IP cannot all pass the check before the
+    /// first failure is recorded (TOCTOU). A failure converts a reservation into a failure; a
+    /// success removes the whole entry.
+    pending: u32,
 }
+
+/// Process-wide registry of live limiters keyed by canonicalized data directory (the `PAIRING_STORES`
+/// pattern). Weak entries let a limiter die with its last server instance; sister instances serving the
+/// same data directory share one budget instead of multiplying it.
+static LOGIN_LIMITERS: OnceLock<Mutex<HashMap<PathBuf, Weak<LoginRateLimiter>>>> = OnceLock::new();
 
 impl LoginRateLimiter {
     pub fn new() -> Self {
@@ -45,17 +61,39 @@ impl LoginRateLimiter {
         }
     }
 
-    /// Whether this IP may attempt a login now. Does not count as an attempt by itself.
+    /// Shared limiter for one data directory: every in-process server instance over the same directory
+    /// (CLI `--serve` primary, auto-started secondary, GUI/Electron) gets the same limiter, so an
+    /// attacker cannot multiply the per-IP budget by the number of instances.
+    pub fn shared(data_dir: &Path) -> Arc<Self> {
+        // Canonicalize so `/tmp/x` and `/private/tmp/x` (macOS) resolve to the same limiter; fall back
+        // to the raw path when the directory cannot be resolved.
+        let key = data_dir
+            .canonicalize()
+            .unwrap_or_else(|_| data_dir.to_path_buf());
+        let registry = LOGIN_LIMITERS.get_or_init(|| Mutex::new(HashMap::new()));
+        let mut map = registry.lock().unwrap();
+        // Prune dead entries so the map does not accumulate one Weak per finished server lifetime.
+        map.retain(|_, w| w.strong_count() > 0);
+        if let Some(existing) = map.get(&key).and_then(Weak::upgrade) {
+            return existing;
+        }
+        let limiter = Arc::new(Self::new());
+        map.insert(key, Arc::downgrade(&limiter));
+        limiter
+    }
+
+    /// Whether this IP may attempt a login now. A `true` result **reserves** one attempt against the
+    /// window immediately, so it must be paired with exactly one `record_failure` or `record_success`.
     pub fn allow(&self, ip: IpAddr) -> bool {
         self.allow_at(ip, Instant::now())
     }
 
-    /// Record a failed login attempt for this IP.
+    /// Record a failed login attempt for this IP, converting its pending reservation into a failure.
     pub fn record_failure(&self, ip: IpAddr) {
         self.record_failure_at(ip, Instant::now());
     }
 
-    /// Clear the failure counter after a successful login: a legitimate user who mistyped a few times
+    /// Clear the attempt counter after a successful login: a legitimate user who mistyped a few times
     /// must not carry the penalty into the next window.
     pub fn record_success(&self, ip: IpAddr) {
         let mut entries = self.entries.lock().unwrap();
@@ -66,10 +104,16 @@ impl LoginRateLimiter {
     fn allow_at(&self, ip: IpAddr, now: Instant) -> bool {
         let mut entries = self.entries.lock().unwrap();
         prune(&mut entries, now);
-        match entries.get(&ip) {
-            Some(e) => e.failures < MAX_FAILURES,
-            None => true,
+        let e = entries.entry(ip).or_insert(WindowEntry {
+            window_start: now,
+            failures: 0,
+            pending: 0,
+        });
+        if e.failures.saturating_add(e.pending) >= MAX_FAILURES {
+            return false;
         }
+        e.pending = e.pending.saturating_add(1);
+        true
     }
 
     /// Time-injectable core of [`record_failure`].
@@ -79,7 +123,9 @@ impl LoginRateLimiter {
         let e = entries.entry(ip).or_insert(WindowEntry {
             window_start: now,
             failures: 0,
+            pending: 0,
         });
+        e.pending = e.pending.saturating_sub(1);
         e.failures = e.failures.saturating_add(1);
     }
 }
@@ -151,8 +197,91 @@ mod tests {
             l.record_failure_at(ip(last), t0);
         }
         assert_eq!(l.entries.lock().unwrap().len(), 100);
-        // Any access after the window prunes every expired entry.
+        // Any access after the window prunes every expired entry; only the fresh reservation that
+        // this allow itself creates remains.
         assert!(l.allow_at(ip(1), t0 + WINDOW));
-        assert_eq!(l.entries.lock().unwrap().len(), 0);
+        assert_eq!(l.entries.lock().unwrap().len(), 1);
+    }
+
+    /// TOCTOU regression: `allow` reserves the attempt, so MAX_FAILURES parallel requests from one IP
+    /// exhaust the budget even before any of them records its failure.
+    #[test]
+    fn parallel_reservations_cannot_undercut_the_limit() {
+        let l = LoginRateLimiter::new();
+        let t0 = Instant::now();
+        // Simulate N in-flight requests: all call allow before any outcome is recorded.
+        for _ in 0..MAX_FAILURES {
+            assert!(l.allow_at(ip(1), t0));
+        }
+        // Attempt N+1 is rejected although zero failures have been recorded yet.
+        assert!(!l.allow_at(ip(1), t0));
+        // The in-flight requests now fail; the budget stays exhausted, not doubled.
+        for _ in 0..MAX_FAILURES {
+            l.record_failure_at(ip(1), t0);
+        }
+        assert!(!l.allow_at(ip(1), t0));
+        // Reservations expire with the window like failures do.
+        assert!(l.allow_at(ip(1), t0 + WINDOW));
+    }
+
+    /// A success releases the reservation and clears the counter, so a legitimate login within the
+    /// budget never blocks the next attempt.
+    #[test]
+    fn success_releases_the_reservation() {
+        let l = LoginRateLimiter::new();
+        let t0 = Instant::now();
+        for _ in 0..MAX_FAILURES {
+            assert!(l.allow_at(ip(1), t0));
+            l.record_success(ip(1));
+        }
+        assert!(l.allow_at(ip(1), t0));
+    }
+
+    /// Dual-instance fix: two server instances over the same data directory share ONE limiter, so an
+    /// attacker gets one budget, not one per instance. Different directories stay independent, and the
+    /// registry is Weak: once the last instance drops its Arc, a later instance gets a fresh limiter.
+    #[test]
+    fn limiter_is_shared_per_data_dir() {
+        let dir_a = std::env::temp_dir().join(format!(
+            "vlx-rl-a-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        let dir_b = std::env::temp_dir().join(format!(
+            "vlx-rl-b-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&dir_a).unwrap();
+        std::fs::create_dir_all(&dir_b).unwrap();
+
+        let first = LoginRateLimiter::shared(&dir_a);
+        let second = LoginRateLimiter::shared(&dir_a);
+        assert!(
+            std::sync::Arc::ptr_eq(&first, &second),
+            "instances over the same data dir must share one limiter"
+        );
+
+        // Exhaust the budget through the first handle; the second handle sees the block immediately.
+        let t0 = Instant::now();
+        for _ in 0..MAX_FAILURES {
+            assert!(first.allow_at(ip(9), t0));
+            first.record_failure_at(ip(9), t0);
+        }
+        assert!(!second.allow_at(ip(9), t0), "5x5 dual-instance budget must be closed");
+
+        // An unrelated data dir gets its own limiter and budget.
+        let other = LoginRateLimiter::shared(&dir_b);
+        assert!(!std::sync::Arc::ptr_eq(&first, &other));
+        assert!(other.allow_at(ip(9), t0));
+
+        // Weak registry: dropping every Arc lets the limiter die; the next shared() starts fresh.
+        drop(first);
+        drop(second);
+        let revived = LoginRateLimiter::shared(&dir_a);
+        assert!(revived.allow_at(ip(9), t0), "a revived limiter starts with an empty window");
+
+        let _ = std::fs::remove_dir_all(&dir_a);
+        let _ = std::fs::remove_dir_all(&dir_b);
     }
 }

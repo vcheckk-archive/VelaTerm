@@ -816,6 +816,9 @@ const zhCN: typeof en = {
   "transport.wsDisconnected": "WebSocket 已断开",
   "transport.wsConnectFailed": "WebSocket 连接失败",
   "transport.cmdFailed": "命令失败",
+  "transport.remoteCmdForbidden": (cmd: string) => `远程客户端不可使用该命令：${cmd}`, // Command not available to remote clients
+  "transport.remoteSettingForbidden": (key: string) => `远程客户端不可写入该设置项：${key}`, // Settings key not writable by remote clients
+  "transport.remotePathForbidden": (path: string) => `远程客户端无法访问应用数据目录中的文件：${path}`, // Remote clients cannot access files in the app data directory
 
   // ── Crepe (built-in WYSIWYG editor UI) ──
   "crepe.placeholder": "输入正文，或键入 / 唤起插入菜单",

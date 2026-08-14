@@ -657,7 +657,7 @@ mod tests {
         assert_eq!(reply["ok"], json!(false));
         assert_eq!(
             reply["error"],
-            json!("Command not available to remote clients: web_pairing_create"),
+            json!("remote_cmd_forbidden:web_pairing_create"),
             "a LAN-exposed instance must gate management commands in handle_text"
         );
 

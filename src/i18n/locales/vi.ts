@@ -824,6 +824,9 @@ const vi: typeof en = {
   "transport.wsDisconnected": "WebSocket đã ngắt kết nối",
   "transport.wsConnectFailed": "Kết nối WebSocket thất bại",
   "transport.cmdFailed": "Lệnh thất bại",
+  "transport.remoteCmdForbidden": (cmd: string) => `Lệnh không khả dụng cho máy khách từ xa: ${cmd}`, // Command not available to remote clients
+  "transport.remoteSettingForbidden": (key: string) => `Khóa cài đặt không thể ghi bởi máy khách từ xa: ${key}`, // Settings key not writable by remote clients
+  "transport.remotePathForbidden": (path: string) => `Máy khách từ xa không thể truy cập tệp trong thư mục dữ liệu của ứng dụng: ${path}`, // Remote clients cannot access files in the app data directory
 
   // Trình soạn thảo WYSIWYG
   "crepe.placeholder": "Nhập văn bản hoặc nhấn / để mở menu chèn",

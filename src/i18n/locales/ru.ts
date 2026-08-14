@@ -853,6 +853,9 @@ const ru: typeof en = {
   "transport.wsDisconnected": "WebSocket отключён", // WebSocket disconnected
   "transport.wsConnectFailed": "Не удалось подключиться по WebSocket", // WebSocket connection failed
   "transport.cmdFailed": "Команда не выполнена", // Command failed
+  "transport.remoteCmdForbidden": (cmd: string) => `Команда недоступна для удалённых клиентов: ${cmd}`, // Command not available to remote clients
+  "transport.remoteSettingForbidden": (key: string) => `Ключ настроек недоступен для записи удалёнными клиентами: ${key}`, // Settings key not writable by remote clients
+  "transport.remotePathForbidden": (path: string) => `Удалённые клиенты не могут обращаться к файлам в каталоге данных приложения: ${path}`, // Remote clients cannot access files in the app data directory
 
   // ── Crepe（WYSIWYG-редактор）──
   "crepe.placeholder": "Введите текст или нажмите / для меню вставки", // Type text, or press / for the insert menu

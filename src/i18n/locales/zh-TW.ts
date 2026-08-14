@@ -817,6 +817,9 @@ const zhTW: typeof en = {
   "transport.wsDisconnected": "WebSocket 已斷線", // WebSocket disconnected
   "transport.wsConnectFailed": "WebSocket 連線失敗", // WebSocket connection failed
   "transport.cmdFailed": "命令失敗", // Command failed
+  "transport.remoteCmdForbidden": (cmd: string) => `遠端用戶端無法使用此命令：${cmd}`, // Command not available to remote clients
+  "transport.remoteSettingForbidden": (key: string) => `遠端用戶端無法寫入此設定鍵：${key}`, // Settings key not writable by remote clients
+  "transport.remotePathForbidden": (path: string) => `遠端用戶端無法存取應用程式資料目錄中的檔案：${path}`, // Remote clients cannot access files in the app data directory
 
   // ── Crepe (built-in WYSIWYG editor UI) ──
   "crepe.placeholder": "輸入內文，或鍵入 / 開啟插入選單", // Type text, or press / for the insert menu

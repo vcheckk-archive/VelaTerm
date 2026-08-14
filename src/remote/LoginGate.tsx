@@ -70,8 +70,16 @@ export function LoginGate({ children }: { children: ReactNode }) {
   // silently relogin and reconnect, unless the password is rejected. Without a password, return to login.
   useEffect(() => {
     if (isTauri) return;
-    return wsClient.onAuthLost(() => {
+    return wsClient.onAuthLost((reason) => {
       if (wsClient.isPairingMode()) {
+        // Server-side login throttling is temporary, not a credential failure: return to the
+        // password form with the rate-limit message (the same key the HTTP 429 path uses below)
+        // instead of the terminal "link expired" guidance.
+        if (reason === "rate_limited") {
+          setError(t("login.rateLimited"));
+          setPhase("need-login");
+          return;
+        }
         setPhase("auth-failed");
         return;
       }
