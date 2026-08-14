@@ -23,22 +23,40 @@ import { invoke } from "../../ipc/transport";
 /** app_settings key persisting the selected advertised IP; empty string means automatic (backend default). */
 const SHARE_IP_KEY = "vlx-share-ip";
 
-/**
- * Move URLs whose host is exactly `ip` to the front, keeping backend order otherwise.
- * Host comparison is exact (up to `:` or `/` after the scheme), so `10.0.0.1` never matches `10.0.0.11`.
- */
+/** Extract the host of a URL, exact up to `:` or `/` after the scheme, so `10.0.0.1` never matches `10.0.0.11`. */
+function hostOf(u: string): string {
+  const start = u.indexOf("://");
+  if (start < 0) return "";
+  const rest = u.slice(start + 3);
+  const end = rest.search(/[/:]/);
+  return end < 0 ? rest : rest.slice(0, end);
+}
+
+/** Move URLs whose host is exactly `ip` to the front, keeping backend order otherwise. */
 export function orderUrlsBySelectedIp(urls: string[], ip: string): string[] {
   if (!ip) return urls;
-  const hostOf = (u: string) => {
-    const start = u.indexOf("://");
-    if (start < 0) return "";
-    const rest = u.slice(start + 3);
-    const end = rest.search(/[/:]/);
-    return end < 0 ? rest : rest.slice(0, end);
-  };
   const hits = urls.filter((u) => hostOf(u) === ip);
   if (hits.length === 0) return urls;
   return [...hits, ...urls.filter((u) => hostOf(u) !== ip)];
+}
+
+/**
+ * Display URLs for an explicitly selected IP. The backend URL list mirrors the interface snapshot
+ * taken at server START, while the selector enumerates interfaces LIVE — an interface that appeared
+ * afterwards (e.g. Tailscale connecting later) is selectable but absent from the snapshot. In that
+ * case, derive its URL from the snapshot's scheme (which encodes the serve mode) and the live port
+ * and put it first, so the primary copied link and the QR carry the chosen IP without a restart.
+ */
+export function urlsForSelectedIp(
+  urls: string[],
+  ip: string,
+  port: number | null,
+): string[] {
+  if (!ip) return urls;
+  if (urls.some((u) => hostOf(u) === ip)) return orderUrlsBySelectedIp(urls, ip);
+  if (urls.length === 0 || port == null) return urls;
+  const scheme = urls[0].startsWith("http://") ? "http" : "https";
+  return [`${scheme}://${ip}:${port}`, ...urls];
 }
 
 export function RemoteAccessPanel({
@@ -77,6 +95,12 @@ export function RemoteAccessPanel({
   const [ifaces, setIfaces] = useState<NetworkInterface[]>([]);
   // Persisted advertised-IP selection; empty string means automatic (backend picks the first LAN address).
   const [selectedIp, setSelectedIp] = useState("");
+  // Monotonic pairing-request sequence: only the latest request may apply its result, so an older
+  // response resolving late can never overwrite a newer link (in-flight guard for genPairing).
+  const pairSeq = useRef(0);
+  // Address the latest pairing request was issued with; null until the first request. Drives the
+  // regeneration effect below independently of whether that request has already resolved.
+  const pairRequestedIp = useRef<string | null>(null);
 
   useEffect(() => {
     webServerStatus()
@@ -117,14 +141,23 @@ export function RemoteAccessPanel({
     } else {
       setDevices([]);
       setPairUrl(null);
+      // Invalidate in-flight pairing responses and the request marker; the next start re-pairs fresh.
+      pairSeq.current++;
+      pairRequestedIp.current = null;
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [status?.running]);
 
   // Regenerate the pairing link when the effective selection changes while running, so the link, QR,
-  // and primary URL follow it. Also covers the persisted setting arriving after the automatic pairing.
+  // and primary URL follow it. Keyed on the address the latest pairing request used (not on pairUrl),
+  // so a persisted IP arriving while the automatic first pairing is still in flight reliably re-pairs.
   useEffect(() => {
-    if (status?.running && pairUrl) void genPairing(false);
+    if (
+      status?.running &&
+      pairRequestedIp.current !== null &&
+      pairRequestedIp.current !== effectiveIp
+    )
+      void genPairing(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [effectiveIp]);
 
@@ -175,10 +208,15 @@ export function RemoteAccessPanel({
   // With rotate=false, fetch the current link after startup. With rotate=true, issue a new token,
   // invalidate the old link, clear registrations, and disconnect all devices.
   const genPairing = async (rotate: boolean) => {
+    // Overlapping calls are possible (e.g. the automatic first pairing racing a re-pair for a
+    // late-arriving persisted IP); the sequence guard lets only the latest request take effect.
+    const seq = ++pairSeq.current;
+    pairRequestedIp.current = effectiveIp;
     setPairBusy(true);
     setError("");
     try {
       const info = await webPairingCreate(effectiveIp || undefined, rotate);
+      if (seq !== pairSeq.current) return;
       setPairUrl(info.url);
       if (rotate) {
         webDevicesList()
@@ -186,9 +224,9 @@ export function RemoteAccessPanel({
           .catch(() => setDevices([]));
       }
     } catch (e) {
-      setError(String(e));
+      if (seq === pairSeq.current) setError(String(e));
     } finally {
-      setPairBusy(false);
+      if (seq === pairSeq.current) setPairBusy(false);
     }
   };
 
@@ -219,13 +257,14 @@ export function RemoteAccessPanel({
 
   const running = status?.running ?? false;
   // Prefer the backend's multi-interface URL list and fall back to its single URL. The selected IP's
-  // URL moves to the front so the primary displayed/copied link and the QR carry the chosen host.
+  // URL moves to the front — derived from scheme and port when the IP is missing from the start-time
+  // snapshot — so the primary displayed/copied link and the QR carry the chosen host.
   const baseUrls = status?.urls?.length
     ? status.urls
     : status?.url
       ? [status.url]
       : [];
-  const urls = orderUrlsBySelectedIp(baseUrls, effectiveIp);
+  const urls = urlsForSelectedIp(baseUrls, effectiveIp, status?.port ?? null);
 
   // Advertised-IP selector, shown while stopped (below the port field) and while running (above the
   // pairing block); one persisted selection drives both.

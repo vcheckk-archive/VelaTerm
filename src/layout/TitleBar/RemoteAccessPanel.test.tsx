@@ -10,25 +10,32 @@ import type { WebServerStatus } from "../../ipc/webServer";
 
 const {
   invokeMock,
+  defaultInvoke,
   networkInterfacesListMock,
   webPairingCreateMock,
   webServerStatusMock,
+  webServerStartMock,
   appSettings,
 } = vi.hoisted(() => {
   const appSettings: Record<string, string> = {};
+  // Default invoke implementation; tests overriding it (e.g. to defer get_app_settings) rely on
+  // afterEach restoring it, because vi.clearAllMocks keeps implementations.
+  const defaultInvoke = (cmd: string, args?: { entries?: Record<string, string> }) => {
+    if (cmd === "get_app_settings") return Promise.resolve({ ...appSettings });
+    if (cmd === "set_app_settings") {
+      Object.assign(appSettings, args?.entries ?? {});
+      return Promise.resolve(null);
+    }
+    return Promise.reject(new Error(`unexpected invoke: ${cmd}`));
+  };
   return {
     appSettings,
-    invokeMock: vi.fn((cmd: string, args?: { entries?: Record<string, string> }) => {
-      if (cmd === "get_app_settings") return Promise.resolve({ ...appSettings });
-      if (cmd === "set_app_settings") {
-        Object.assign(appSettings, args?.entries ?? {});
-        return Promise.resolve(null);
-      }
-      return Promise.reject(new Error(`unexpected invoke: ${cmd}`));
-    }),
+    defaultInvoke,
+    invokeMock: vi.fn(defaultInvoke),
     networkInterfacesListMock: vi.fn(),
     webPairingCreateMock: vi.fn(),
     webServerStatusMock: vi.fn(),
+    webServerStartMock: vi.fn(),
   };
 });
 
@@ -50,14 +57,18 @@ vi.mock("qrcode.react", () => ({
 vi.mock("../../ipc/webServer", () => ({
   networkInterfacesList: networkInterfacesListMock,
   webServerStatus: webServerStatusMock,
-  webServerStart: vi.fn(),
+  webServerStart: webServerStartMock,
   webServerStop: vi.fn(),
   webPairingCreate: webPairingCreateMock,
   webDevicesList: vi.fn().mockResolvedValue([]),
   webDeviceRevoke: vi.fn(),
 }));
 
-import { orderUrlsBySelectedIp, RemoteAccessPanel } from "./RemoteAccessPanel";
+import {
+  orderUrlsBySelectedIp,
+  RemoteAccessPanel,
+  urlsForSelectedIp,
+} from "./RemoteAccessPanel";
 
 const LAN_URL = "https://192.168.1.5:8799";
 const CGNAT_URL = "https://100.100.83.2:8799";
@@ -112,6 +123,7 @@ function mockStopped(extra: Partial<WebServerStatus>) {
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+  invokeMock.mockImplementation(defaultInvoke);
   for (const key of Object.keys(appSettings)) delete appSettings[key];
 });
 
@@ -208,6 +220,226 @@ describe("advertised-IP selector", () => {
 
     // The stored value is untouched; only an explicit re-selection would overwrite it.
     expect(appSettings["vlx-share-ip"]).toBe("10.9.9.9");
+  });
+
+  it("derives primary URL and QR for a selected IP absent from the start-time snapshot", async () => {
+    // status.urls mirrors the interface snapshot frozen at server START; the selector enumerates
+    // LIVE. Simulate Tailscale connecting after start: 100.101.0.7 is selectable but not in urls.
+    webServerStatusMock.mockResolvedValue(runningStatus());
+    networkInterfacesListMock.mockResolvedValue([
+      { name: "en0", ip: "192.168.1.5", vpn: false },
+      { name: "utun4", ip: "100.101.0.7", vpn: true },
+    ]);
+    // Address-independent pairing mock: the returned URL never echoes the requested address, so the
+    // assertions below can only be satisfied by the display derivation (urls → pairUrls), never by a
+    // `[pairUrl]` fallback echoing the mock input.
+    webPairingCreateMock.mockResolvedValue({
+      url: `${LAN_URL}/#pair=tok`,
+      deviceToken: "device-token",
+    });
+    render(<RemoteAccessPanel onClose={vi.fn()} />);
+
+    await waitFor(() => {
+      const sel = screen.getByRole("combobox", { name: "remote.ipLabel" }) as HTMLSelectElement;
+      expect(sel.options.length).toBe(3);
+    });
+    fireEvent.change(screen.getByRole("combobox", { name: "remote.ipLabel" }), {
+      target: { value: "100.101.0.7" },
+    });
+
+    await waitFor(() =>
+      expect(webPairingCreateMock).toHaveBeenCalledWith("100.101.0.7", false),
+    );
+
+    // Even though 100.101.0.7 is missing from status.urls, the primary displayed/copied pairing
+    // URL and the QR carry it — derived from the snapshot's scheme and the live port.
+    await waitFor(() => {
+      const copyButtons = screen.getAllByTitle("remote.copyUrl");
+      expect(copyButtons[0].textContent).toContain("https://100.101.0.7:8799/#pair=tok");
+    });
+    await waitFor(() => {
+      const qr = document.querySelector("[data-qr-value]");
+      expect(qr?.getAttribute("data-qr-value")).toBe("https://100.101.0.7:8799/#pair=tok");
+    });
+  });
+
+  it("re-pairs when the persisted IP arrives while the first pairing is in flight; a stale response never wins", async () => {
+    webServerStatusMock.mockResolvedValue(runningStatus());
+    networkInterfacesListMock.mockResolvedValue([
+      { name: "en0", ip: "192.168.1.5", vpn: false },
+      { name: "utun3", ip: "100.100.83.2", vpn: true },
+    ]);
+    // Controllable pairing requests: each call parks a deferred so the test dictates resolution order.
+    const pending: Array<{
+      address: string | undefined;
+      resolve: (v: { url: string; deviceToken: string }) => void;
+    }> = [];
+    webPairingCreateMock.mockImplementation(
+      (address?: string) =>
+        new Promise<{ url: string; deviceToken: string }>((resolve) =>
+          pending.push({ address, resolve }),
+        ),
+    );
+    // Defer the persisted settings so they arrive strictly AFTER the automatic pairing started.
+    let resolveSettings!: (v: Record<string, string>) => void;
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "get_app_settings")
+        return new Promise<Record<string, string>>((res) => {
+          resolveSettings = res;
+        });
+      return Promise.resolve(null);
+    });
+
+    render(<RemoteAccessPanel onClose={vi.fn()} />);
+
+    // The automatic first pairing starts (no address) and stays in flight.
+    await waitFor(() => expect(pending.length).toBe(1));
+    expect(pending[0].address).toBeUndefined();
+
+    // The persisted IP arrives while that request is pending: a re-pair with it must be issued
+    // (the old pairUrl-guarded effect never fired here because pairUrl was still null).
+    resolveSettings({ "vlx-share-ip": "100.100.83.2" });
+    await waitFor(() => expect(pending.length).toBe(2));
+    expect(pending[1].address).toBe("100.100.83.2");
+
+    // The newer request resolves first; its link is displayed.
+    pending[1].resolve({ url: "https://100.100.83.2:8799/#pair=tok", deviceToken: "t" });
+    await waitFor(() => {
+      const copyButtons = screen.getAllByTitle("remote.copyUrl");
+      expect(copyButtons[0].textContent).toContain("https://100.100.83.2:8799/#pair=tok");
+    });
+
+    // The stale automatic request resolves late and must NOT overwrite the newer link.
+    pending[0].resolve({ url: `${LAN_URL}/#pair=stale`, deviceToken: "t" });
+    await new Promise((r) => setTimeout(r, 0));
+    const copyButtons = screen.getAllByTitle("remote.copyUrl");
+    expect(copyButtons[0].textContent).toContain("https://100.100.83.2:8799/#pair=tok");
+    expect(copyButtons[0].textContent).not.toContain("stale");
+  });
+});
+
+describe("stopped-state IP selector", () => {
+  it("shows the selector while stopped, and a pre-start selection drives the first pairing after start", async () => {
+    webServerStatusMock.mockResolvedValue(stoppedStatus({}));
+    networkInterfacesListMock.mockResolvedValue([
+      { name: "en0", ip: "192.168.1.5", vpn: false },
+      { name: "utun3", ip: "100.100.83.2", vpn: true },
+    ]);
+    webPairingCreateMock.mockImplementation((address?: string) =>
+      Promise.resolve({
+        url: `${address ? `https://${address}:8799` : LAN_URL}/#pair=tok`,
+        deviceToken: "device-token",
+      }),
+    );
+    webServerStartMock.mockResolvedValue(runningStatus());
+    render(<RemoteAccessPanel onClose={vi.fn()} />);
+
+    // The stopped panel shows the selector (next to the port field) with all options.
+    await waitFor(() => {
+      const sel = screen.getByRole("combobox", { name: "remote.ipLabel" }) as HTMLSelectElement;
+      expect(sel.options.length).toBe(3);
+    });
+    expect(screen.getByPlaceholderText("8799")).toBeTruthy();
+
+    // Select an IP BEFORE starting, then start the service.
+    fireEvent.change(screen.getByRole("combobox", { name: "remote.ipLabel" }), {
+      target: { value: "100.100.83.2" },
+    });
+    expect(appSettings["vlx-share-ip"]).toBe("100.100.83.2");
+    fireEvent.change(screen.getByPlaceholderText("remote.passwordPlaceholder"), {
+      target: { value: "pw" },
+    });
+    fireEvent.click(screen.getByText("remote.start"));
+
+    // The first pairing after start carries the pre-start selection, never the automatic default.
+    await waitFor(() =>
+      expect(webPairingCreateMock).toHaveBeenCalledWith("100.100.83.2", false),
+    );
+    expect(webPairingCreateMock).not.toHaveBeenCalledWith(undefined, false);
+
+    // After a microtask flush still exactly ONE pairing call (with the chosen address): a later
+    // automatic default call firing after the positive waitFor would otherwise slip through.
+    await new Promise((r) => setTimeout(r, 0));
+    expect(webPairingCreateMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("stop invalidates in-flight pairing responses; the next start pairs fresh", async () => {
+    webServerStatusMock.mockResolvedValue(runningStatus());
+    networkInterfacesListMock.mockResolvedValue([
+      { name: "en0", ip: "192.168.1.5", vpn: false },
+    ]);
+    // Controllable pairing requests, parked as deferreds so the test dictates resolution order.
+    const pending: Array<{
+      address: string | undefined;
+      resolve: (v: { url: string; deviceToken: string }) => void;
+    }> = [];
+    webPairingCreateMock.mockImplementation(
+      (address?: string) =>
+        new Promise<{ url: string; deviceToken: string }>((resolve) =>
+          pending.push({ address, resolve }),
+        ),
+    );
+    render(<RemoteAccessPanel onClose={vi.fn()} />);
+
+    // The automatic pairing after startup is issued and stays in flight.
+    await waitFor(() => expect(pending.length).toBe(1));
+
+    // Stop the service while that request is pending.
+    webServerStatusMock.mockResolvedValue(stoppedStatus({}));
+    fireEvent.click(screen.getByText("remote.stop"));
+    await waitFor(() => screen.getByText("remote.start"));
+
+    // The parked response resolves late: it must NOT revive a pairing block in the stopped panel.
+    pending[0].resolve({ url: `${LAN_URL}/#pair=stale`, deviceToken: "t" });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(screen.queryByTitle("remote.copyUrl")).toBeNull();
+
+    // A subsequent start pairs fresh and shows the new link, never the stale one.
+    webServerStartMock.mockResolvedValue(runningStatus());
+    fireEvent.change(screen.getByPlaceholderText("remote.passwordPlaceholder"), {
+      target: { value: "pw" },
+    });
+    fireEvent.click(screen.getByText("remote.start"));
+    await waitFor(() => expect(pending.length).toBe(2));
+    // Before the fresh pairing resolves, the running panel must not resurrect the stale link:
+    // the stop-time invalidation discarded the in-flight response, so no pairing URL exists yet.
+    for (const btn of screen.queryAllByTitle("remote.copyUrl")) {
+      expect(btn.textContent).not.toContain("stale");
+    }
+    pending[1].resolve({ url: `${LAN_URL}/#pair=fresh`, deviceToken: "t" });
+    await waitFor(() => {
+      const copyButtons = screen.getAllByTitle("remote.copyUrl");
+      expect(copyButtons[0].textContent).toContain("#pair=fresh");
+      expect(copyButtons[0].textContent).not.toContain("stale");
+    });
+  });
+});
+
+describe("urlsForSelectedIp", () => {
+  it("reorders like orderUrlsBySelectedIp when the selected IP is in the snapshot", () => {
+    expect(urlsForSelectedIp([LAN_URL, CGNAT_URL], "100.100.83.2", 8799)).toEqual([
+      CGNAT_URL,
+      LAN_URL,
+    ]);
+  });
+
+  it("synthesizes a URL from the snapshot scheme and the live port when the IP is missing", () => {
+    expect(urlsForSelectedIp([LAN_URL, CGNAT_URL], "100.101.0.7", 8799)).toEqual([
+      "https://100.101.0.7:8799",
+      LAN_URL,
+      CGNAT_URL,
+    ]);
+    // The plaintext-HTTP mode's scheme is preserved.
+    expect(urlsForSelectedIp(["http://192.168.1.5:8080"], "10.0.0.7", 8080)).toEqual([
+      "http://10.0.0.7:8080",
+      "http://192.168.1.5:8080",
+    ]);
+  });
+
+  it("returns the list unchanged for automatic, an empty snapshot, or an unknown port", () => {
+    expect(urlsForSelectedIp([LAN_URL, CGNAT_URL], "", 8799)).toEqual([LAN_URL, CGNAT_URL]);
+    expect(urlsForSelectedIp([], "10.0.0.7", 8799)).toEqual([]);
+    expect(urlsForSelectedIp([LAN_URL], "10.0.0.7", null)).toEqual([LAN_URL]);
   });
 });
 

@@ -2,8 +2,12 @@
 //! shown as an expired-link/wrong-password terminal screen): a `rate_limited` reason returns to the
 //! password form with the same login.rateLimited message the HTTP-429 path uses, while credential
 //! failures keep the terminal auth-failed guidance.
+//!
+//! Also covers the silent-relogin latch: an explicit password rejection latches reloginRejected and
+//! stops silent retries, but HTTP 429 (rate limiting) is temporary and must NOT be latched — a later
+//! auth-lost event retries and can succeed once the limit expires.
 
-import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const { authLostCbs, pairingMode, session, wsClientMock } = vi.hoisted(() => {
@@ -119,5 +123,75 @@ describe("LoginGate non-pairing (token) mode on rate_limited", () => {
     // relogin — a second /api/login fires immediately and, on success, the client reconnects.
     await waitFor(() => expect(loginCalls.length).toBe(2));
     await waitFor(() => expect(wsClientMock.reconnectNow).toHaveBeenCalled());
+  });
+});
+
+/** Minimal Response-like object covering the `ok`/`status`/`json()` surface LoginGate reads. */
+function resp(status: number, body: unknown = {}) {
+  return { ok: status >= 200 && status < 300, status, json: () => Promise.resolve(body) };
+}
+
+/** Stub fetch: /api/mode reports plain password login; /api/login pops queued responses in order. */
+function stubFetch(loginResponses: Array<ReturnType<typeof resp>>) {
+  const fetchMock = vi.fn((url: string) => {
+    if (url === "/api/mode") return Promise.resolve(resp(200, { requirePairing: false }));
+    if (url === "/api/login") {
+      const r = loginResponses.shift();
+      return r ? Promise.resolve(r) : Promise.reject(new Error("no queued login response"));
+    }
+    return Promise.reject(new Error(`unexpected fetch: ${url}`));
+  });
+  vi.stubGlobal("fetch", fetchMock);
+  return fetchMock;
+}
+
+/** Render the gate in token mode, wait for the password form, and log in manually so the gate's
+ * passwordRef holds "pw" for the silent-relogin path. */
+async function loginManually() {
+  pairingMode.value = false;
+  render(<LoginGate>APP-CONTENT</LoginGate>);
+  await waitFor(() => screen.getByPlaceholderText("login.passwordPlaceholder"));
+  fireEvent.change(screen.getByPlaceholderText("login.passwordPlaceholder"), {
+    target: { value: "pw" },
+  });
+  fireEvent.click(screen.getByText("login.connect"));
+  await waitFor(() => screen.getByText("APP-CONTENT"));
+}
+
+describe("LoginGate relogin latch", () => {
+  it("does not latch a 429 relogin: a later auth-lost retries and succeeds", async () => {
+    const fetchMock = stubFetch([
+      resp(200, { token: "tk-1" }), // manual login
+      resp(429), // silent relogin hits the rate limiter — temporary, must not latch
+      resp(200, { token: "tk-2" }), // retry after the limit expired
+    ]);
+    await loginManually();
+
+    // Credentials lost; the silent relogin runs into the rate limiter: back on the password form
+    // with the rate-limit message, not silently latched as a rejection.
+    fireAuthLost();
+    await waitFor(() => screen.getByText("login.rateLimited"));
+    expect(screen.queryByText("APP-CONTENT")).toBeNull();
+
+    // A later auth-lost event must retry (not be suppressed by a latch) and succeed.
+    fireAuthLost();
+    await waitFor(() => screen.getByText("APP-CONTENT"));
+    expect(fetchMock.mock.calls.filter(([u]) => u === "/api/login").length).toBe(3);
+  });
+
+  it("still latches an explicit password rejection: no further silent relogin attempts", async () => {
+    const fetchMock = stubFetch([
+      resp(200, { token: "tk-1" }), // manual login
+      resp(401), // explicit rejection — latches until the next successful manual login
+    ]);
+    await loginManually();
+
+    fireAuthLost();
+    await waitFor(() => screen.getByPlaceholderText("login.passwordPlaceholder"));
+
+    // A second auth-lost event must NOT trigger another silent login attempt.
+    fireAuthLost();
+    await waitFor(() => screen.getByPlaceholderText("login.passwordPlaceholder"));
+    expect(fetchMock.mock.calls.filter(([u]) => u === "/api/login").length).toBe(2);
   });
 });

@@ -98,8 +98,14 @@ export function LoginGate({ children }: { children: ReactNode }) {
               setPhase("ready");
               return;
             }
-            // Explicit rejection usually means the server restarted with another password; stop retrying.
-            reloginRejected.current = true;
+            if (r.status === 429) {
+              // Rate limiting is temporary, not a credential failure: show the rate-limit message
+              // and do NOT latch reloginRejected, so a later attempt can succeed after it expires.
+              setError(t("login.rateLimited"));
+            } else {
+              // Explicit rejection usually means the server restarted with another password; stop retrying.
+              reloginRejected.current = true;
+            }
           } catch {
             /* Let reconnect backoff handle network failure; recovery will invoke onAuthLost again. */
           } finally {

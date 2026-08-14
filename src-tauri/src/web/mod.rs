@@ -568,8 +568,9 @@ fn mime_for(path: &str) -> &'static str {
 ///    such as Tailscale assign; `is_private()` does not cover CGNAT, but peers on the same mesh can reach it.
 /// 2. Exclude network and broadcast addresses; macOS internal interfaces often report unreachable `.0` noise.
 /// 3. Exclude system-internal, VM, container, and bridge interfaces by name.
-/// 4. Rank broadcast-capable Wi-Fi/Ethernet first and point-to-point VPN/tunnel interfaces last. Tunnels remain as
-///    fallbacks because they can be the only reachable address for VPN users, but must not become the default.
+/// 4. Rank broadcast-capable Wi-Fi/Ethernet first and point-to-point VPN/tunnel interfaces last; CGNAT
+///    addresses always rank behind every non-CGNAT entry, regardless of broadcast capability. Tunnels remain
+///    as fallbacks because they can be the only reachable address for VPN users, but must not become the default.
 fn lan_ips() -> Vec<String> {
     iface_candidates().into_iter().map(|c| c.ip).collect()
 }
@@ -594,10 +595,9 @@ pub fn network_interfaces_list() -> Vec<NetworkInterface> {
 }
 
 /// Single enumeration behind [`lan_ips`] and [`network_interfaces_list`]; applies the documented rules
-/// and orders broadcast-capable LAN interfaces before point-to-point VPN tunnels.
+/// and delegates ranking to the pure [`order_candidates`].
 fn iface_candidates() -> Vec<NetworkInterface> {
-    let mut normal: Vec<NetworkInterface> = Vec::new();
-    let mut ptp: Vec<NetworkInterface> = Vec::new();
+    let mut candidates: Vec<NetworkInterface> = Vec::new();
     if let Ok(ifaces) = if_addrs::get_if_addrs() {
         for iface in ifaces {
             if iface.is_loopback() || is_virtual_iface(&iface.name) {
@@ -612,21 +612,31 @@ fn iface_candidates() -> Vec<NetworkInterface> {
                 }
                 // A broadcast address indicates normal LAN; its absence usually indicates a point-to-point VPN.
                 let vpn = v4.broadcast.is_none();
-                let entry = NetworkInterface {
+                candidates.push(NetworkInterface {
                     name,
                     ip: v4.ip.to_string(),
                     vpn,
-                };
-                if vpn {
-                    ptp.push(entry);
-                } else {
-                    normal.push(entry);
-                }
+                });
             }
         }
     }
-    normal.extend(ptp);
-    normal
+    order_candidates(candidates)
+}
+
+/// Pure ranking of accepted candidates: CGNAT (100.64.0.0/10, e.g. Tailscale) addresses always rank
+/// behind every non-CGNAT entry regardless of broadcast capability, and within each of those groups
+/// broadcast-capable LAN interfaces come before point-to-point tunnels. The sort is stable, so OS
+/// enumeration order is preserved inside each bucket. Separated from [`iface_candidates`] so the
+/// ordering invariant is unit-testable without depending on the machine's real interfaces.
+fn order_candidates(mut candidates: Vec<NetworkInterface>) -> Vec<NetworkInterface> {
+    let cgnat = |c: &NetworkInterface| {
+        c.ip
+            .parse::<std::net::Ipv4Addr>()
+            .map(is_cgnat)
+            .unwrap_or(false)
+    };
+    candidates.sort_by_key(|c| (cgnat(c), c.vpn));
+    candidates
 }
 
 /// Whether an IPv4 lies in the RFC 6598 carrier-grade NAT range 100.64.0.0/10, used by Tailscale.
@@ -675,7 +685,7 @@ fn is_network_or_broadcast(ip: std::net::Ipv4Addr, netmask: std::net::Ipv4Addr) 
 mod tests {
     use super::{
         hash_password, is_cgnat, is_network_or_broadcast, is_production_identifier,
-        is_virtual_iface, ServeMode, StartAuth, WebServer,
+        is_virtual_iface, order_candidates, NetworkInterface, ServeMode, StartAuth, WebServer,
     };
     use std::net::Ipv4Addr;
 
@@ -915,6 +925,49 @@ mod tests {
         // Ordinary private ranges are not CGNAT; they stay accepted via is_private().
         assert!(!is_cgnat(Ipv4Addr::new(192, 168, 1, 5)));
         assert!(!is_cgnat(Ipv4Addr::new(10, 0, 0, 5)));
+    }
+
+    /// Shorthand fixture for [`order_candidates`] tests; deliberately independent of real interfaces.
+    fn cand(name: &str, ip: &str, vpn: bool) -> NetworkInterface {
+        NetworkInterface {
+            name: name.into(),
+            ip: ip.into(),
+            vpn,
+        }
+    }
+
+    #[test]
+    fn cgnat_candidates_rank_behind_lan_regardless_of_broadcast_capability() {
+        // Worst-case input order: a broadcast-capable CGNAT entry first (the case the old
+        // broadcast-only heuristic misplaced), then LAN, a non-CGNAT tunnel, and a CGNAT tunnel.
+        let ordered = order_candidates(vec![
+            cand("feth0", "100.100.83.2", false), // CGNAT with broadcast: must not count as LAN.
+            cand("en0", "192.168.1.5", false),
+            cand("utun1", "10.8.0.2", true), // Non-CGNAT VPN tunnel.
+            cand("utun3", "100.101.0.7", true), // CGNAT VPN tunnel (typical Tailscale).
+        ]);
+        let ips: Vec<&str> = ordered.iter().map(|c| c.ip.as_str()).collect();
+        assert_eq!(
+            ips,
+            ["192.168.1.5", "10.8.0.2", "100.100.83.2", "100.101.0.7"],
+            "CGNAT must rank behind every non-CGNAT entry; broadcast-capable before tunnels within each group"
+        );
+    }
+
+    #[test]
+    fn order_candidates_is_stable_within_buckets() {
+        // OS enumeration order is meaningful inside a bucket and must survive the ranking.
+        let ordered = order_candidates(vec![
+            cand("en0", "192.168.1.5", false),
+            cand("en1", "10.0.0.5", false),
+            cand("utun3", "100.100.83.2", true),
+            cand("utun4", "100.100.83.3", true),
+        ]);
+        let ips: Vec<&str> = ordered.iter().map(|c| c.ip.as_str()).collect();
+        assert_eq!(
+            ips,
+            ["192.168.1.5", "10.0.0.5", "100.100.83.2", "100.100.83.3"]
+        );
     }
 
     #[test]
