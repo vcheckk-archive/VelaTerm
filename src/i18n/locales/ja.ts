@@ -303,6 +303,9 @@ const ja: typeof en = {
   "remote.deviceBlockHint":
     "ブロックした端末は切断され、再接続できません（再度ペアリングリンクが必要）。他の端末には影響しません。", // Block hint
   "remote.devicesEmpty": "ペアリング済みの端末はありません", // No paired devices yet
+  "remote.autoRestartHint":
+    "リモートアクセスはアプリの再起動時に自動的に再開されます。「サーバーを停止」で無効になります。", // Remote access restarts automatically when the app is reopened. Stop Server turns this off.
+  "remote.autostartFailed": "自動起動に失敗しました:", // Automatic start failed:
 
   // ── Remote connection panel ──
   "connect.title": "リモートサーバーに接続", // Connect to Remote Server
@@ -788,6 +791,7 @@ const ja: typeof en = {
   "login.passwordPlaceholder": "アクセスパスワード", // Access password
   "login.connect": "接続", // Connect
   "login.wrongPassword": "パスワードが違います", // Wrong password
+  "login.rateLimited": "試行回数が多すぎます。1分ほど待ってから再度お試しください。", // Too many attempts. Please wait a minute and try again.
   "login.failed": "ログインに失敗しました。もう一度お試しください", // Login failed, please try again
   "login.pairingRequired": "このサーバーはペアリングリンクが必要です。デスクトップアプリの「リモートアクセス」で生成したリンクを開いてください。", // This server requires a pairing link
   "login.authFailed": "パスワードが違うか、ペアリングリンクの有効期限が切れています。新しいペアリングリンクで再接続してください。", // Wrong password or pairing link expired
@@ -832,6 +836,9 @@ const ja: typeof en = {
   "transport.wsDisconnected": "WebSocket が切断されました", // WebSocket disconnected
   "transport.wsConnectFailed": "WebSocket 接続に失敗しました", // WebSocket connection failed
   "transport.cmdFailed": "コマンドが失敗しました", // Command failed
+  "transport.remoteCmdForbidden": (cmd: string) => `このコマンドはリモートクライアントでは利用できません: ${cmd}`, // Command not available to remote clients
+  "transport.remoteSettingForbidden": (key: string) => `この設定キーはリモートクライアントからは書き込めません: ${key}`, // Settings key not writable by remote clients
+  "transport.remotePathForbidden": (path: string) => `リモートクライアントはアプリのデータディレクトリ内のファイルにアクセスできません: ${path}`, // Remote clients cannot access files in the app data directory
 
   // ── Crepe (built-in WYSIWYG editor UI) ──
   "crepe.placeholder": "本文を入力するか、/ で挿入メニューを開きます", // Type text, or press / for the insert menu

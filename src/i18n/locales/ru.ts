@@ -314,6 +314,9 @@ const ru: typeof en = {
   "remote.deviceBlockHint":
     "Заблокированные устройства отключаются и не могут переподключиться (нужна новая ссылка сопряжения). Другие устройства не затрагиваются.", // Block hint
   "remote.devicesEmpty": "Нет сопряжённых устройств", // No paired devices yet
+  "remote.autoRestartHint":
+    "Удалённый доступ автоматически возобновляется при повторном открытии приложения. «Остановить сервер» отключает это.", // Remote access restarts automatically when the app is reopened. Stop Server turns this off.
+  "remote.autostartFailed": "Сбой автоматического запуска:", // Automatic start failed:
 
   // ── Remote connection panel ──
   "connect.title": "Подключиться к удалённому серверу", // Connect to Remote Server
@@ -814,6 +817,7 @@ const ru: typeof en = {
   "login.passwordPlaceholder": "Пароль доступа", // Access password
   "login.connect": "Подключиться", // Connect
   "login.wrongPassword": "Неверный пароль", // Wrong password
+  "login.rateLimited": "Слишком много попыток. Подождите минуту и попробуйте снова.", // Too many attempts. Please wait a minute and try again.
   "login.failed": "Не удалось войти, попробуйте ещё раз", // Login failed, please try again
   "login.pairingRequired": "Этот сервер требует ссылку для сопряжения. Откройте ссылку, созданную в панели «Удалённый доступ» настольного приложения.", // This server requires a pairing link
   "login.authFailed": "Неверный пароль или ссылка для сопряжения устарела. Подключитесь снова по новой ссылке.", // Wrong password or pairing link expired
@@ -859,6 +863,9 @@ const ru: typeof en = {
   "transport.wsDisconnected": "WebSocket отключён", // WebSocket disconnected
   "transport.wsConnectFailed": "Не удалось подключиться по WebSocket", // WebSocket connection failed
   "transport.cmdFailed": "Команда не выполнена", // Command failed
+  "transport.remoteCmdForbidden": (cmd: string) => `Команда недоступна для удалённых клиентов: ${cmd}`, // Command not available to remote clients
+  "transport.remoteSettingForbidden": (key: string) => `Ключ настроек недоступен для записи удалёнными клиентами: ${key}`, // Settings key not writable by remote clients
+  "transport.remotePathForbidden": (path: string) => `Удалённые клиенты не могут обращаться к файлам в каталоге данных приложения: ${path}`, // Remote clients cannot access files in the app data directory
 
   // ── Crepe（WYSIWYG-редактор）──
   "crepe.placeholder": "Введите текст или нажмите / для меню вставки", // Type text, or press / for the insert menu

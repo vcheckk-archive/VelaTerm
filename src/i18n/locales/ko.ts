@@ -303,6 +303,9 @@ const ko: typeof en = {
   "remote.deviceBlockHint":
     "차단된 기기는 연결이 끊기고 다시 연결할 수 없습니다(새 페어링 링크 필요). 다른 기기에는 영향이 없습니다.", // Block hint
   "remote.devicesEmpty": "페어링된 기기가 없습니다", // No paired devices yet
+  "remote.autoRestartHint":
+    "원격 액세스는 앱을 다시 열면 자동으로 다시 시작됩니다. \"서버 중지\"로 끌 수 있습니다.", // Remote access restarts automatically when the app is reopened. Stop Server turns this off.
+  "remote.autostartFailed": "자동 시작 실패:", // Automatic start failed:
 
   // ── Remote connection panel ──
   "connect.title": "원격 서버에 연결", // Connect to Remote Server
@@ -785,6 +788,7 @@ const ko: typeof en = {
   "login.passwordPlaceholder": "접속 비밀번호", // Access password
   "login.connect": "연결", // Connect
   "login.wrongPassword": "비밀번호가 틀렸습니다", // Wrong password
+  "login.rateLimited": "시도 횟수가 너무 많습니다. 1분 후 다시 시도해 주세요.", // Too many attempts. Please wait a minute and try again.
   "login.failed": "로그인 실패, 다시 시도하세요", // Login failed, please try again
   "login.pairingRequired": "이 서버는 페어링 링크가 필요합니다. 데스크톱 앱의 '원격 액세스'에서 생성한 링크로 여세요.", // This server requires a pairing link
   "login.authFailed": "비밀번호가 틀렸거나 페어링 링크가 만료되었습니다. 새 페어링 링크로 다시 연결하세요.", // Wrong password or pairing link expired
@@ -829,6 +833,9 @@ const ko: typeof en = {
   "transport.wsDisconnected": "WebSocket 연결이 끊어졌습니다", // WebSocket disconnected
   "transport.wsConnectFailed": "WebSocket 연결 실패", // WebSocket connection failed
   "transport.cmdFailed": "명령 실패", // Command failed
+  "transport.remoteCmdForbidden": (cmd: string) => `원격 클라이언트에서 사용할 수 없는 명령입니다: ${cmd}`, // Command not available to remote clients
+  "transport.remoteSettingForbidden": (key: string) => `원격 클라이언트가 쓸 수 없는 설정 키입니다: ${key}`, // Settings key not writable by remote clients
+  "transport.remotePathForbidden": (path: string) => `원격 클라이언트는 앱 데이터 디렉터리의 파일에 접근할 수 없습니다: ${path}`, // Remote clients cannot access files in the app data directory
 
   // ── Crepe（위지윅 편집기 내장 UI）──
   "crepe.placeholder": "본문을 입력하거나 / 로 삽입 메뉴를 여세요", // Type text, or press / for the insert menu

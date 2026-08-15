@@ -1,7 +1,7 @@
 //! Desktop remote-access panel for controlling the web service, setting a password, and displaying
 //! LAN addresses. Devices on the same network can open an address and authenticate to use the desktop UI.
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { QRCodeSVG } from "qrcode.react";
 import { useT } from "../../i18n";
 import { Backdrop } from "../../components/Backdrop";
@@ -23,22 +23,43 @@ import { invoke } from "../../ipc/transport";
 /** app_settings key persisting the selected advertised IP; empty string means automatic (backend default). */
 const SHARE_IP_KEY = "vlx-share-ip";
 
-/**
- * Move URLs whose host is exactly `ip` to the front, keeping backend order otherwise.
- * Host comparison is exact (up to `:` or `/` after the scheme), so `10.0.0.1` never matches `10.0.0.11`.
- */
+/** Extract the host of a URL, exact up to `:` or `/` after the scheme, so `10.0.0.1` never matches `10.0.0.11`. */
+function hostOf(u: string): string {
+  const start = u.indexOf("://");
+  if (start < 0) return "";
+  const rest = u.slice(start + 3);
+  const end = rest.search(/[/:]/);
+  return end < 0 ? rest : rest.slice(0, end);
+}
+
+/** Move URLs whose host is exactly `ip` to the front, keeping backend order otherwise. */
 export function orderUrlsBySelectedIp(urls: string[], ip: string): string[] {
   if (!ip) return urls;
-  const hostOf = (u: string) => {
-    const start = u.indexOf("://");
-    if (start < 0) return "";
-    const rest = u.slice(start + 3);
-    const end = rest.search(/[/:]/);
-    return end < 0 ? rest : rest.slice(0, end);
-  };
   const hits = urls.filter((u) => hostOf(u) === ip);
   if (hits.length === 0) return urls;
   return [...hits, ...urls.filter((u) => hostOf(u) !== ip)];
+}
+
+/**
+ * Display URLs for an explicitly selected IP. The backend URL list mirrors the interface snapshot
+ * taken at server START, while the selector enumerates interfaces LIVE — an interface that appeared
+ * afterwards (e.g. Tailscale connecting later) is selectable but absent from the snapshot. In that
+ * case, synthesize its URL from the backend-reported scheme (explicit in the status since the
+ * `scheme` field; inferring from the snapshot's first URL remains only as a fallback for a stale
+ * backend without the field) and the live port, and put it first, so the primary copied link and
+ * the QR carry the chosen IP without a restart.
+ */
+export function urlsForSelectedIp(
+  urls: string[],
+  ip: string,
+  port: number | null,
+  scheme: string | null,
+): string[] {
+  if (!ip) return urls;
+  if (urls.some((u) => hostOf(u) === ip)) return orderUrlsBySelectedIp(urls, ip);
+  if (urls.length === 0 || port == null) return urls;
+  const s = scheme ?? (urls[0].startsWith("http://") ? "http" : "https");
+  return [`${s}://${ip}:${port}`, ...urls];
 }
 
 export function RemoteAccessPanel({
@@ -52,8 +73,10 @@ export function RemoteAccessPanel({
   const t = useT();
   const [status, setStatus] = useState<WebServerStatus | null>(null);
   const [password, setPassword] = useState("");
-  // Listening port defaults to 8799 and remains editable in case it is occupied.
+  // Listening port defaults to 8799 and remains editable in case it is occupied. The first status load
+  // prefills the last persisted port unless the user already typed one.
   const [port, setPort] = useState("8799");
+  const portTouched = useRef(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [copiedUrl, setCopiedUrl] = useState<string | null>(null);
@@ -75,10 +98,22 @@ export function RemoteAccessPanel({
   const [ifaces, setIfaces] = useState<NetworkInterface[]>([]);
   // Persisted advertised-IP selection; empty string means automatic (backend picks the first LAN address).
   const [selectedIp, setSelectedIp] = useState("");
+  // Monotonic pairing-request sequence: only the latest request may apply its result, so an older
+  // response resolving late can never overwrite a newer link (in-flight guard for genPairing).
+  const pairSeq = useRef(0);
+  // Address the latest pairing request was issued with; null until the first request. Drives the
+  // regeneration effect below independently of whether that request has already resolved.
+  const pairRequestedIp = useRef<string | null>(null);
 
   useEffect(() => {
     webServerStatus()
-      .then(setStatus)
+      .then((s) => {
+        setStatus(s);
+        // Restore the last used port after restart/remount instead of hardcoding 8799.
+        if (s.savedPort != null && !portTouched.current) {
+          setPort(String(s.savedPort));
+        }
+      })
       .catch(() => setStatus(null));
     networkInterfacesList()
       .then(setIfaces)
@@ -99,6 +134,17 @@ export function RemoteAccessPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [status?.running, status?.port]);
 
+  // Invalidate in-flight pairing responses and reset the COMPLETE pairing state; used when the
+  // service stops or its pairing link can no longer be trusted. Bumping pairSeq strands in-flight
+  // requests, whose `finally` therefore skips its own busy reset — so pairBusy must be cleared
+  // here, or an invalidated in-flight request would leave the regenerate button disabled forever.
+  const resetPairing = () => {
+    pairSeq.current++;
+    pairRequestedIp.current = null;
+    setPairUrl(null);
+    setPairBusy(false);
+  };
+
   // While running, load registered devices and automatically show a pairing link; clear them on stop.
   useEffect(() => {
     if (status?.running) {
@@ -108,15 +154,21 @@ export function RemoteAccessPanel({
       void genPairing(false);
     } else {
       setDevices([]);
-      setPairUrl(null);
+      resetPairing();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [status?.running]);
 
   // Regenerate the pairing link when the effective selection changes while running, so the link, QR,
-  // and primary URL follow it. Also covers the persisted setting arriving after the automatic pairing.
+  // and primary URL follow it. Keyed on the address the latest pairing request used (not on pairUrl),
+  // so a persisted IP arriving while the automatic first pairing is still in flight reliably re-pairs.
   useEffect(() => {
-    if (status?.running && pairUrl) void genPairing(false);
+    if (
+      status?.running &&
+      pairRequestedIp.current !== null &&
+      pairRequestedIp.current !== effectiveIp
+    )
+      void genPairing(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [effectiveIp]);
 
@@ -154,9 +206,12 @@ export function RemoteAccessPanel({
     setError("");
     try {
       await webServerStop();
+      // The service is down: invalidate the pairing state HERE and not only via the status-driven
+      // effect, which never fires when the status query below throws (status would stay "running"
+      // and a late in-flight pairing response could re-populate the dead link).
+      resetPairing();
       setStatus(await webServerStatus());
       setPassword("");
-      setPairUrl(null);
     } catch (e) {
       setError(String(e));
     } finally {
@@ -167,10 +222,15 @@ export function RemoteAccessPanel({
   // With rotate=false, fetch the current link after startup. With rotate=true, issue a new token,
   // invalidate the old link, clear registrations, and disconnect all devices.
   const genPairing = async (rotate: boolean) => {
+    // Overlapping calls are possible (e.g. the automatic first pairing racing a re-pair for a
+    // late-arriving persisted IP); the sequence guard lets only the latest request take effect.
+    const seq = ++pairSeq.current;
+    pairRequestedIp.current = effectiveIp;
     setPairBusy(true);
     setError("");
     try {
       const info = await webPairingCreate(effectiveIp || undefined, rotate);
+      if (seq !== pairSeq.current) return;
       setPairUrl(info.url);
       if (rotate) {
         webDevicesList()
@@ -178,9 +238,9 @@ export function RemoteAccessPanel({
           .catch(() => setDevices([]));
       }
     } catch (e) {
-      setError(String(e));
+      if (seq === pairSeq.current) setError(String(e));
     } finally {
-      setPairBusy(false);
+      if (seq === pairSeq.current) setPairBusy(false);
     }
   };
 
@@ -211,13 +271,19 @@ export function RemoteAccessPanel({
 
   const running = status?.running ?? false;
   // Prefer the backend's multi-interface URL list and fall back to its single URL. The selected IP's
-  // URL moves to the front so the primary displayed/copied link and the QR carry the chosen host.
+  // URL moves to the front — derived from scheme and port when the IP is missing from the start-time
+  // snapshot — so the primary displayed/copied link and the QR carry the chosen host.
   const baseUrls = status?.urls?.length
     ? status.urls
     : status?.url
       ? [status.url]
       : [];
-  const urls = orderUrlsBySelectedIp(baseUrls, effectiveIp);
+  const urls = urlsForSelectedIp(
+    baseUrls,
+    effectiveIp,
+    status?.port ?? null,
+    status?.scheme ?? null,
+  );
 
   // Advertised-IP selector, shown while stopped (below the port field) and while running (above the
   // pairing block); one persisted selection drives both.
@@ -290,6 +356,10 @@ export function RemoteAccessPanel({
           top: 44,
           right: 12,
           width: 280,
+          // Cap to the viewport (44px top offset + 12px bottom margin) and scroll, so long content
+          // such as the pairing QR code stays reachable instead of overflowing off-screen.
+          maxHeight: "calc(100vh - 56px)",
+          overflowY: "auto",
           background: "var(--bg-2)",
           border: "1px solid var(--border-strong)",
           borderRadius: "var(--r-md)",
@@ -342,6 +412,17 @@ export function RemoteAccessPanel({
               <span style={{ fontSize: 12, color: "var(--text)" }}>
                 {t("remote.running", status?.port ?? 0)}
               </span>
+            </div>
+
+            <div
+              style={{
+                fontSize: 11,
+                color: "var(--text-dim)",
+                lineHeight: 1.5,
+                marginBottom: 8,
+              }}
+            >
+              {t("remote.autoRestartHint")}
             </div>
 
             {status && status.fingerprint && (
@@ -598,7 +679,10 @@ export function RemoteAccessPanel({
                 inputMode="numeric"
                 value={port}
                 placeholder="8799"
-                onChange={(e) => setPort(e.target.value.replace(/[^0-9]/g, ""))}
+                onChange={(e) => {
+                  portTouched.current = true;
+                  setPort(e.target.value.replace(/[^0-9]/g, ""));
+                }}
                 onKeyDown={(e) => {
                   if (e.key === "Enter") void start();
                 }}
@@ -645,6 +729,19 @@ export function RemoteAccessPanel({
               {busy ? t("remote.starting") : t("remote.start")}
             </button>
           </>
+        )}
+
+        {status?.autostartError && (
+          <div
+            style={{
+              marginTop: 10,
+              fontSize: 11,
+              color: "var(--danger, #ff6b6b)",
+              lineHeight: 1.4,
+            }}
+          >
+            {t("remote.autostartFailed")} {status.autostartError}
+          </div>
         )}
 
         {error && (

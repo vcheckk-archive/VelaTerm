@@ -1665,18 +1665,35 @@ fn git_show_bytes(cwd: &str, spec: &str) -> Option<Vec<u8>> {
     Some(out.stdout)
 }
 
+/// The filesystem path `file_diff` reads for the worktree side: `repo_top(cwd)` joined with `path`.
+/// Callers that enforce access control (the remote data-dir ACL in web dispatch) must gate THIS path,
+/// not the raw arguments: `Path::join` replaces the base entirely for an absolute `path`, and
+/// `repo_top` falls back to `cwd` outside a repository, so the effective target is caller-chosen.
+pub fn file_diff_worktree_path(cwd: &str, path: &str) -> std::path::PathBuf {
+    std::path::Path::new(&repo_top(cwd)).join(path)
+}
+
 /// Return HEAD/worktree text for one file. Added/untracked has no original; deleted has no modified.
 /// If either side is binary/oversized, set binary and leave both strings empty.
 pub fn file_diff(cwd: &str, path: &str) -> Result<FileDiff, String> {
     if cwd.trim().is_empty() || path.trim().is_empty() {
         return Err("Missing working directory or path".into());
     }
-    let top = repo_top(cwd);
+    file_diff_at(cwd, path, &file_diff_worktree_path(cwd, path))
+}
+
+/// [`file_diff`] with a caller-supplied effective worktree path. Callers that enforce access control
+/// (the remote data-dir ACL in web dispatch) compute the path ONCE via [`file_diff_worktree_path`],
+/// gate it, and pass the SAME value here — so the checked path and the read path cannot diverge, and
+/// the `repo_top` git subprocess runs once instead of twice.
+pub fn file_diff_at(cwd: &str, path: &str, work_path: &std::path::Path) -> Result<FileDiff, String> {
+    if cwd.trim().is_empty() || path.trim().is_empty() {
+        return Err("Missing working directory or path".into());
+    }
     // HEAD side via `git show HEAD:<path>`; added/untracked files have no object.
     let original_bytes = git_show_bytes(cwd, &format!("HEAD:{path}"));
-    // Worktree side reads the repository file; deleted files are absent.
-    let work_path = std::path::Path::new(&top).join(path);
-    let modified_bytes = std::fs::read(&work_path).ok();
+    // Worktree side reads the caller-resolved repository file; deleted files are absent.
+    let modified_bytes = std::fs::read(work_path).ok();
 
     let orig_bin = original_bytes
         .as_deref()
@@ -1739,6 +1756,35 @@ mod merge_tests {
         git(&dir, &["commit", "-q", "-m", "init"]);
         git(&dir, &["branch", "-M", "main"]);
         dir
+    }
+
+    /// file_diff_at with the precomputed effective path returns exactly what file_diff returns —
+    /// the pass-through contract the web dispatch remote lane relies on after gating that path.
+    #[test]
+    fn file_diff_at_matches_file_diff_on_the_precomputed_path() {
+        let dir = init_repo();
+        std::fs::write(dir.join("a.txt"), "hello\nworld\n").unwrap();
+        let cwd = dir.to_string_lossy().to_string();
+        let work_path = file_diff_worktree_path(&cwd, "a.txt");
+        let direct = file_diff(&cwd, "a.txt").unwrap();
+        let via_path = file_diff_at(&cwd, "a.txt", &work_path).unwrap();
+        assert_eq!(direct.original, via_path.original);
+        assert_eq!(direct.modified, via_path.modified);
+        assert_eq!(via_path.original, "hello\n");
+        assert_eq!(via_path.modified, "hello\nworld\n");
+        // Discrimination check: file_diff_at must read the CALLER-supplied work_path, not
+        // recompute it internally — pass a decoy file and expect its content back. This is the
+        // check/use property the remote ACL relies on (gate the path once, read the same path).
+        std::fs::write(dir.join("b.txt"), "decoy\n").unwrap();
+        let via_decoy = file_diff_at(&cwd, "a.txt", &dir.join("b.txt")).unwrap();
+        assert_eq!(
+            via_decoy.modified, "decoy\n",
+            "file_diff_at must read the caller-provided worktree path"
+        );
+        // Empty arguments stay rejected on both entry points.
+        assert!(file_diff_at("", "a.txt", &work_path).is_err());
+        assert!(file_diff_at(&cwd, " ", &work_path).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Derive default clone directory names from common repository URL forms.

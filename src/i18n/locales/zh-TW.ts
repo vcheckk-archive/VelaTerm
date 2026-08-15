@@ -300,6 +300,9 @@ const zhTW: typeof en = {
   "remote.deviceBlockHint":
     "被禁裝置會被中斷且無法重連（需重新用配對連結），其他裝置不受影響。", // Block hint
   "remote.devicesEmpty": "尚無已配對裝置", // No paired devices yet
+  "remote.autoRestartHint":
+    "重新開啟應用程式時遠端存取會自動恢復，「停止伺服器」可關閉此功能。", // Remote access restarts automatically when the app is reopened. Stop Server turns this off.
+  "remote.autostartFailed": "自動啟動失敗：", // Automatic start failed:
 
   // ── Remote connection panel ──
   "connect.title": "連線到遠端服務", // Connect to Remote Server
@@ -779,6 +782,7 @@ const zhTW: typeof en = {
   "login.passwordPlaceholder": "存取密碼", // Access password
   "login.connect": "連線", // Connect
   "login.wrongPassword": "密碼錯誤", // Wrong password
+  "login.rateLimited": "嘗試次數過多，請稍候一分鐘後再試。", // Too many attempts. Please wait a minute and try again.
   "login.failed": "登入失敗，請重試", // Login failed, please try again
   "login.pairingRequired": "此服務要求使用配對連結存取。請用桌面端「遠端存取」產生的配對連結開啟。", // This server requires a pairing link
   "login.authFailed": "密碼錯誤，或配對連結已失效，請用新的配對連結重新連線。", // Wrong password or pairing link expired
@@ -823,6 +827,9 @@ const zhTW: typeof en = {
   "transport.wsDisconnected": "WebSocket 已斷線", // WebSocket disconnected
   "transport.wsConnectFailed": "WebSocket 連線失敗", // WebSocket connection failed
   "transport.cmdFailed": "命令失敗", // Command failed
+  "transport.remoteCmdForbidden": (cmd: string) => `遠端用戶端無法使用此命令：${cmd}`, // Command not available to remote clients
+  "transport.remoteSettingForbidden": (key: string) => `遠端用戶端無法寫入此設定鍵：${key}`, // Settings key not writable by remote clients
+  "transport.remotePathForbidden": (path: string) => `遠端用戶端無法存取應用程式資料目錄中的檔案：${path}`, // Remote clients cannot access files in the app data directory
 
   // ── Crepe (built-in WYSIWYG editor UI) ──
   "crepe.placeholder": "輸入內文，或鍵入 / 開啟插入選單", // Type text, or press / for the insert menu

@@ -300,6 +300,9 @@ const vi: typeof en = {
   "remote.deviceBlockHint":
     "Thiết bị bị chặn sẽ mất kết nối và không thể kết nối lại (cần liên kết ghép đôi mới). Các thiết bị khác không bị ảnh hưởng.",
   "remote.devicesEmpty": "Chưa có thiết bị ghép đôi",
+  "remote.autoRestartHint":
+    "Truy cập từ xa sẽ tự khởi động lại khi mở lại ứng dụng. \"Dừng máy chủ\" sẽ tắt tính năng này.", // Remote access restarts automatically when the app is reopened. Stop Server turns this off.
+  "remote.autostartFailed": "Tự động khởi động thất bại:", // Automatic start failed:
   "connect.title": "Kết nối máy chủ từ xa",
   "connect.pairingPlaceholder": "Dán liên kết ghép đôi",
   "connect.confirmConnect": "Dấu vân tay khớp, kết nối",
@@ -788,6 +791,7 @@ const vi: typeof en = {
   "login.passwordPlaceholder": "Mật khẩu truy cập",
   "login.connect": "Kết nối",
   "login.wrongPassword": "Sai mật khẩu",
+  "login.rateLimited": "Quá nhiều lần thử. Vui lòng đợi một phút rồi thử lại.", // Too many attempts. Please wait a minute and try again.
   "login.failed": "Đăng nhập thất bại, vui lòng thử lại",
   "login.pairingRequired": "Máy chủ này yêu cầu liên kết ghép đôi. Hãy mở liên kết từ bảng Truy cập từ xa của ứng dụng máy tính.",
   "login.authFailed": "Sai mật khẩu hoặc liên kết ghép đôi đã hết hạn. Hãy kết nối lại bằng liên kết mới.",
@@ -830,6 +834,9 @@ const vi: typeof en = {
   "transport.wsDisconnected": "WebSocket đã ngắt kết nối",
   "transport.wsConnectFailed": "Kết nối WebSocket thất bại",
   "transport.cmdFailed": "Lệnh thất bại",
+  "transport.remoteCmdForbidden": (cmd: string) => `Lệnh không khả dụng cho máy khách từ xa: ${cmd}`, // Command not available to remote clients
+  "transport.remoteSettingForbidden": (key: string) => `Khóa cài đặt không thể ghi bởi máy khách từ xa: ${key}`, // Settings key not writable by remote clients
+  "transport.remotePathForbidden": (path: string) => `Máy khách từ xa không thể truy cập tệp trong thư mục dữ liệu của ứng dụng: ${path}`, // Remote clients cannot access files in the app data directory
 
   // Trình soạn thảo WYSIWYG
   "crepe.placeholder": "Nhập văn bản hoặc nhấn / để mở menu chèn",

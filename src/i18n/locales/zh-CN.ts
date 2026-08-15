@@ -299,6 +299,9 @@ const zhCN: typeof en = {
   "remote.deviceBlockHint":
     "被禁设备会被断开且无法重连（需重新用配对链接），其他设备不受影响。", // Block hint
   "remote.devicesEmpty": "暂无已配对设备", // No paired devices yet
+  "remote.autoRestartHint":
+    "重新打开应用时远程访问会自动恢复，「停止服务」可关闭此功能。", // Remote access restarts automatically when the app is reopened. Stop Server turns this off.
+  "remote.autostartFailed": "自动启动失败：", // Automatic start failed:
 
   // ── Remote connection panel ──
   "connect.title": "连接远程服务",
@@ -778,6 +781,7 @@ const zhCN: typeof en = {
   "login.passwordPlaceholder": "访问密码",
   "login.connect": "连接",
   "login.wrongPassword": "密码错误",
+  "login.rateLimited": "尝试次数过多，请稍等一分钟后重试。", // Too many attempts. Please wait a minute and try again.
   "login.failed": "登录失败，请重试",
   "login.pairingRequired": "此服务要求使用配对链接访问。请用桌面端「远程访问」生成的配对链接打开。",
   "login.authFailed": "密码错误，或配对链接已失效，请用新的配对链接重新连接。",
@@ -822,6 +826,9 @@ const zhCN: typeof en = {
   "transport.wsDisconnected": "WebSocket 已断开",
   "transport.wsConnectFailed": "WebSocket 连接失败",
   "transport.cmdFailed": "命令失败",
+  "transport.remoteCmdForbidden": (cmd: string) => `远程客户端不可使用该命令：${cmd}`, // Command not available to remote clients
+  "transport.remoteSettingForbidden": (key: string) => `远程客户端不可写入该设置项：${key}`, // Settings key not writable by remote clients
+  "transport.remotePathForbidden": (path: string) => `远程客户端无法访问应用数据目录中的文件：${path}`, // Remote clients cannot access files in the app data directory
 
   // ── Crepe (built-in WYSIWYG editor UI) ──
   "crepe.placeholder": "输入正文，或键入 / 唤起插入菜单",

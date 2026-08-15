@@ -304,6 +304,9 @@ const de: typeof en = {
   "remote.deviceBlockHint":
     "Gesperrte Geräte werden getrennt und können sich nicht erneut verbinden (ein neuer Kopplungslink ist nötig). Andere Geräte sind nicht betroffen.", // Block hint
   "remote.devicesEmpty": "Keine gekoppelten Geräte", // No paired devices yet
+  "remote.autoRestartHint":
+    "Der Fernzugriff startet beim erneuten Öffnen der App automatisch. „Server stoppen“ schaltet das ab.", // Remote access restarts automatically when the app is reopened. Stop Server turns this off.
+  "remote.autostartFailed": "Automatischer Start fehlgeschlagen:", // Automatic start failed:
 
   // ── Remote connection panel ──
   "connect.title": "Mit Remote-Server verbinden", // Connect to Remote Server
@@ -797,6 +800,7 @@ const de: typeof en = {
   "login.passwordPlaceholder": "Zugangspasswort", // Access password
   "login.connect": "Verbinden", // Connect
   "login.wrongPassword": "Falsches Passwort", // Wrong password
+  "login.rateLimited": "Zu viele Versuche. Bitte eine Minute warten und erneut versuchen.", // Too many attempts. Please wait a minute and try again.
   "login.failed": "Anmeldung fehlgeschlagen, bitte erneut versuchen", // Login failed, please try again
   "login.pairingRequired": "Dieser Server erfordert einen Kopplungslink. Öffnen Sie den im Fernzugriff-Bereich der Desktop-App erzeugten Link.", // This server requires a pairing link
   "login.authFailed": "Falsches Passwort oder der Kopplungslink ist abgelaufen. Bitte verbinden Sie sich mit einem neuen Kopplungslink erneut.", // Wrong password or pairing link expired
@@ -842,6 +846,9 @@ const de: typeof en = {
   "transport.wsDisconnected": "WebSocket getrennt", // WebSocket disconnected
   "transport.wsConnectFailed": "WebSocket-Verbindung fehlgeschlagen", // WebSocket connection failed
   "transport.cmdFailed": "Befehl fehlgeschlagen", // Command failed
+  "transport.remoteCmdForbidden": (cmd: string) => `Befehl für Remote-Clients nicht verfügbar: ${cmd}`, // Command not available to remote clients
+  "transport.remoteSettingForbidden": (key: string) => `Einstellungsschlüssel für Remote-Clients nicht schreibbar: ${key}`, // Settings key not writable by remote clients
+  "transport.remotePathForbidden": (path: string) => `Remote-Clients können nicht auf Dateien im App-Datenverzeichnis zugreifen: ${path}`, // Remote clients cannot access files in the app data directory
 
   // ── Crepe（WYSIWYG-Editor）──
   "crepe.placeholder": "Text eingeben oder / für das Einfügemenü drücken", // Type text, or press / for the insert menu
