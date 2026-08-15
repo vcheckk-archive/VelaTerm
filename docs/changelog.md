@@ -9,6 +9,10 @@ v0.1.91 is the first public release; earlier version numbers were internal itera
 
 ## Unreleased
 
+### Remote access
+
+- **Pick which address the share link uses — Tailscale addresses now show up.** The address list only accepted the classic private IPv4 ranges, so VPN meshes such as Tailscale, which assign addresses from the carrier-grade NAT range (100.64.0.0/10), were silently dropped from the remote-access panel and the pairing link — even though the server was already reachable through them. These addresses are now listed, with VPN tunnels ranked last so they never become the default. A new IP selector in the panel — shown before starting and while running — lists every candidate with its interface name and marks VPN tunnels; choosing one moves its URL to the front and regenerates the pairing link with exactly that host, so the link you copy works on a device that can only reach this machine over the VPN, without editing the URL by hand. A QR code under the pairing link lets a phone scan it directly. The choice is remembered; if the chosen interface disappears, the panel falls back to automatic without forgetting it. The server itself is unchanged and keeps listening on all interfaces.
+
 ### Fixed
 
 - **Pairing can be managed from the Electron shell.** Creating a pairing link, listing paired devices and revoking a device existed only as desktop (Tauri) commands; the WebSocket dispatcher used by the Electron shell and browser clients answered "Unknown command", leaving the remote-access panel broken there. All three commands now go through the same core functions on both transports, so the two cannot drift apart, and regression tests cover the new dispatch routes — including creating a real pairing link against a running local server.

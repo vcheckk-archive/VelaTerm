@@ -1,5 +1,9 @@
 ## Chưa phát hành
 
+### Truy cập từ xa
+
+- **Chọn địa chỉ mà liên kết chia sẻ sử dụng — địa chỉ Tailscale giờ đã hiển thị.** Danh sách địa chỉ trước đây chỉ chấp nhận các dải IPv4 riêng tư truyền thống, nên các mạng lưới VPN như Tailscale — vốn cấp địa chỉ từ dải NAT cấp nhà mạng (100.64.0.0/10) — bị âm thầm loại khỏi bảng truy cập từ xa và liên kết ghép nối, dù máy chủ vốn đã truy cập được qua các địa chỉ đó. Các địa chỉ này giờ được liệt kê; đường hầm VPN xếp cuối để không bao giờ trở thành mặc định. Bộ chọn IP mới trong bảng — hiển thị trước khi khởi động lẫn khi đang chạy — liệt kê từng ứng viên kèm tên giao diện mạng và đánh dấu đường hầm VPN; chọn một địa chỉ sẽ đưa URL của nó lên đầu và tạo lại liên kết ghép nối với đúng máy chủ đó, nhờ vậy liên kết sao chép được hoạt động trên thiết bị chỉ tới được máy này qua VPN mà không phải sửa URL thủ công. Mã QR bên dưới liên kết ghép nối có thể quét trực tiếp bằng điện thoại. Lựa chọn được ghi nhớ; nếu giao diện mạng đã chọn biến mất, bảng sẽ quay về “Tự động” mà không quên lựa chọn. Bản thân máy chủ không thay đổi và vẫn lắng nghe trên mọi giao diện mạng.
+
 ### Sửa lỗi
 
 - **Giờ đây có thể quản lý ghép đôi từ shell Electron.** Việc tạo liên kết ghép đôi, liệt kê các thiết bị đã ghép đôi và thu hồi một thiết bị trước đây chỉ tồn tại dưới dạng lệnh trên máy tính (Tauri); bộ điều phối WebSocket mà shell Electron và các trình khách trình duyệt sử dụng trả về "Unknown command", khiến bảng truy cập từ xa không hoạt động ở đó. Cả ba lệnh nay đều đi qua cùng các hàm lõi trên cả hai kênh truyền, nên chúng không thể lệch nhau, và các bài kiểm tra hồi quy bao phủ các tuyến điều phối mới — bao gồm việc tạo một liên kết ghép đôi thật với một máy chủ cục bộ đang chạy.

@@ -291,6 +291,11 @@ const ru: typeof en = {
   "remote.start": "Запустить сервер", // Start Server
   "remote.portLabel": "Порт", // Port
   "remote.portInvalid": "Порт должен быть от 1 до 65535", // Port must be between 1 and 65535
+  "remote.ipLabel": "IP-адрес", // IP address
+  "remote.ipAuto": "Автоматически (первый LAN-адрес)", // Automatic (first LAN address)
+  "remote.ipVpn": "VPN", // VPN
+  "remote.qrHint":
+    "Отсканируйте телефоном, чтобы открыть ссылку для сопряжения по выбранному адресу.", // Scan with your phone to open the pairing link on the selected address.
   "remote.fingerprintLabel": "Отпечаток сертификата (SHA-256)", // Certificate fingerprint (SHA-256)
   "remote.fingerprintHint":
     "При первом подключении браузеры предупреждают, что сертификат не доверенный — это нормально для самоподписанного сертификата. Сравните этот отпечаток, чтобы убедиться, что это ваш компьютер.", // On first connect, browsers warn the certificate is untrusted…

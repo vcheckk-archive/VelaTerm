@@ -42,6 +42,21 @@ export function webServerStatus(): Promise<WebServerStatus> {
   return invoke<WebServerStatus>("web_server_status");
 }
 
+/** Selectable network interface matching Rust `NetworkInterface` in camelCase. */
+export interface NetworkInterface {
+  /** OS-reported interface name (e.g. `en0`, `utun3`, `tailscale0`), shown for recognition. */
+  name: string;
+  /** IPv4 address; feeds `webPairingCreate`'s address argument. */
+  ip: string;
+  /** Point-to-point interface without a broadcast address, usually a VPN/tunnel; marked in the selector. */
+  vpn: boolean;
+}
+
+/** List interface candidates for the IP selector, filtered identically to the status URL list. */
+export function networkInterfacesList(): Promise<NetworkInterface[]> {
+  return invoke<NetworkInterface[]>("network_interfaces_list");
+}
+
 /** Pairing result: browser URL containing token/server public key in the URL fragment, plus the device token. */
 export interface PairingInfo {
   url: string;

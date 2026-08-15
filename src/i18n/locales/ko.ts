@@ -280,6 +280,11 @@ const ko: typeof en = {
   "remote.start": "서버 시작", // Start Server
   "remote.portLabel": "포트", // Port
   "remote.portInvalid": "포트는 1에서 65535 사이여야 합니다", // Port must be between 1 and 65535
+  "remote.ipLabel": "IP 주소", // IP address
+  "remote.ipAuto": "자동 (첫 번째 LAN 주소)", // Automatic (first LAN address)
+  "remote.ipVpn": "VPN", // VPN
+  "remote.qrHint":
+    "휴대폰으로 스캔하면 선택한 주소로 페어링 링크가 열립니다.", // Scan with your phone to open the pairing link on the selected address.
   "remote.fingerprintLabel": "인증서 지문 (SHA-256)", // Certificate fingerprint (SHA-256)
   "remote.fingerprintHint":
     "처음 연결할 때 브라우저가 인증서를 신뢰할 수 없다고 경고합니다(자체 서명 인증서에서는 정상). 이 지문을 대조해 이 컴퓨터에 연결 중인지 확인하세요.", // On first connect, browsers warn the certificate is untrusted…

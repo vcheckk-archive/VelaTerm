@@ -478,35 +478,76 @@ fn mime_for(path: &str) -> &'static str {
 /// Filtering is deliberately strict because the first result becomes the pairing-link host.
 ///
 /// Rules:
-/// 1. Keep only non-loopback private IPv4 ranges.
+/// 1. Keep only non-loopback private IPv4 ranges, plus the RFC 6598 CGNAT range (100.64.0.0/10) that VPN meshes
+///    such as Tailscale assign; `is_private()` does not cover CGNAT, but peers on the same mesh can reach it.
 /// 2. Exclude network and broadcast addresses; macOS internal interfaces often report unreachable `.0` noise.
 /// 3. Exclude system-internal, VM, container, and bridge interfaces by name.
 /// 4. Rank broadcast-capable Wi-Fi/Ethernet first and point-to-point VPN/tunnel interfaces last. Tunnels remain as
 ///    fallbacks because they can be the only reachable address for VPN users, but must not become the default.
 fn lan_ips() -> Vec<String> {
-    let mut normal: Vec<String> = Vec::new();
-    let mut ptp: Vec<String> = Vec::new();
+    iface_candidates().into_iter().map(|c| c.ip).collect()
+}
+
+/// A reachable interface candidate exposed to the remote-access panel's IP selector.
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NetworkInterface {
+    /// Interface name as reported by the OS (e.g. `en0`, `utun3`, `tailscale0`), shown for recognition.
+    pub name: String,
+    /// IPv4 address in dotted-decimal form; feeds `web_pairing_create`'s `address` argument.
+    pub ip: String,
+    /// Point-to-point interface without a broadcast address, usually a VPN/tunnel; marked in the selector.
+    pub vpn: bool,
+}
+
+/// Lists the selectable interface candidates with names and a VPN flag for the UI's IP selector.
+/// Shares [`iface_candidates`] with [`lan_ips`] so selector options, URL list, and TLS SANs
+/// are identically filtered by construction.
+pub fn network_interfaces_list() -> Vec<NetworkInterface> {
+    iface_candidates()
+}
+
+/// Single enumeration behind [`lan_ips`] and [`network_interfaces_list`]; applies the documented rules
+/// and orders broadcast-capable LAN interfaces before point-to-point VPN tunnels.
+fn iface_candidates() -> Vec<NetworkInterface> {
+    let mut normal: Vec<NetworkInterface> = Vec::new();
+    let mut ptp: Vec<NetworkInterface> = Vec::new();
     if let Ok(ifaces) = if_addrs::get_if_addrs() {
         for iface in ifaces {
             if iface.is_loopback() || is_virtual_iface(&iface.name) {
                 continue;
             }
+            let name = iface.name;
             if let if_addrs::IfAddr::V4(v4) = iface.addr {
-                if !v4.ip.is_private() || is_network_or_broadcast(v4.ip, v4.netmask) {
+                if !(v4.ip.is_private() || is_cgnat(v4.ip))
+                    || is_network_or_broadcast(v4.ip, v4.netmask)
+                {
                     continue;
                 }
-                let ip = v4.ip.to_string();
                 // A broadcast address indicates normal LAN; its absence usually indicates a point-to-point VPN.
-                if v4.broadcast.is_some() {
-                    normal.push(ip);
+                let vpn = v4.broadcast.is_none();
+                let entry = NetworkInterface {
+                    name,
+                    ip: v4.ip.to_string(),
+                    vpn,
+                };
+                if vpn {
+                    ptp.push(entry);
                 } else {
-                    ptp.push(ip);
+                    normal.push(entry);
                 }
             }
         }
     }
     normal.extend(ptp);
     normal
+}
+
+/// Whether an IPv4 lies in the RFC 6598 carrier-grade NAT range 100.64.0.0/10, used by Tailscale.
+/// Not covered by `Ipv4Addr::is_private()`; a bitmask check avoids the unstable `is_shared()`.
+fn is_cgnat(ip: std::net::Ipv4Addr) -> bool {
+    let o = ip.octets();
+    o[0] == 100 && (o[1] & 0b1100_0000) == 64
 }
 
 /// Whether an interface is system-internal, virtual-machine, container, or bridge traffic unreachable from LAN peers.
@@ -546,7 +587,7 @@ fn is_network_or_broadcast(ip: std::net::Ipv4Addr, netmask: std::net::Ipv4Addr) 
 
 #[cfg(test)]
 mod tests {
-    use super::{is_network_or_broadcast, is_production_identifier, is_virtual_iface};
+    use super::{is_cgnat, is_network_or_broadcast, is_production_identifier, is_virtual_iface};
     use std::net::Ipv4Addr;
 
     #[test]
@@ -605,6 +646,19 @@ mod tests {
             Ipv4Addr::new(192, 168, 97, 0),
             mask16
         ));
+    }
+
+    #[test]
+    fn cgnat_range_boundaries_are_exact() {
+        // 100.64.0.0/10 (RFC 6598, Tailscale) is inside; its immediate neighbours are outside.
+        assert!(!is_cgnat(Ipv4Addr::new(100, 63, 255, 255)));
+        assert!(is_cgnat(Ipv4Addr::new(100, 64, 0, 0)));
+        assert!(is_cgnat(Ipv4Addr::new(100, 100, 83, 2)));
+        assert!(is_cgnat(Ipv4Addr::new(100, 127, 255, 255)));
+        assert!(!is_cgnat(Ipv4Addr::new(100, 128, 0, 0)));
+        // Ordinary private ranges are not CGNAT; they stay accepted via is_private().
+        assert!(!is_cgnat(Ipv4Addr::new(192, 168, 1, 5)));
+        assert!(!is_cgnat(Ipv4Addr::new(10, 0, 0, 5)));
     }
 
     #[test]

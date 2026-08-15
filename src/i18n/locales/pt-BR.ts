@@ -281,6 +281,11 @@ const ptBR: typeof en = {
   "remote.start": "Iniciar servidor", // Start Server
   "remote.portLabel": "Porta", // Port
   "remote.portInvalid": "A porta deve estar entre 1 e 65535", // Port must be between 1 and 65535
+  "remote.ipLabel": "Endereço IP", // IP address
+  "remote.ipAuto": "Automático (primeiro endereço LAN)", // Automatic (first LAN address)
+  "remote.ipVpn": "VPN", // VPN
+  "remote.qrHint":
+    "Escaneie com o celular para abrir o link de pareamento no endereço selecionado.", // Scan with your phone to open the pairing link on the selected address.
   "remote.fingerprintLabel": "Impressão digital do certificado (SHA-256)", // Certificate fingerprint (SHA-256)
   "remote.fingerprintHint":
     "Na primeira conexão, os navegadores avisam que o certificado não é confiável — normal em certificado autoassinado. Compare esta impressão digital para confirmar que é esta máquina.", // On first connect, browsers warn the certificate is untrusted…

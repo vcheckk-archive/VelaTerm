@@ -279,6 +279,11 @@ const vi: typeof en = {
   "remote.start": "Khởi động máy chủ",
   "remote.portLabel": "Cổng",
   "remote.portInvalid": "Cổng phải nằm trong khoảng 1 đến 65535",
+  "remote.ipLabel": "Địa chỉ IP", // IP address
+  "remote.ipAuto": "Tự động (địa chỉ LAN đầu tiên)", // Automatic (first LAN address)
+  "remote.ipVpn": "VPN", // VPN
+  "remote.qrHint":
+    "Quét bằng điện thoại để mở liên kết ghép nối trên địa chỉ đã chọn.", // Scan with your phone to open the pairing link on the selected address.
   "remote.fingerprintLabel": "Dấu vân tay chứng chỉ (SHA-256)",
   "remote.fingerprintHint":
     "Ở lần kết nối đầu tiên, trình duyệt cảnh báo chứng chỉ không đáng tin cậy — điều này bình thường với chứng chỉ tự ký. Đối chiếu dấu vân tay để xác nhận bạn đang kết nối tới máy này.",

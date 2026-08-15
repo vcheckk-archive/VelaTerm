@@ -1,5 +1,9 @@
 ## Unveröffentlicht
 
+### Fernzugriff
+
+- **Wählen Sie, welche Adresse der Freigabe-Link verwendet – Tailscale-Adressen erscheinen jetzt.** Die Adressliste akzeptierte nur die klassischen privaten IPv4-Bereiche, deshalb fielen VPN-Meshes wie Tailscale, die Adressen aus dem Carrier-Grade-NAT-Bereich (100.64.0.0/10) vergeben, stillschweigend aus dem Fernzugriffs-Panel und dem Kopplungslink – obwohl der Server über sie längst erreichbar war. Diese Adressen werden jetzt aufgeführt; VPN-Tunnel stehen am Ende der Liste, damit sie nie zum Standard werden. Eine neue IP-Auswahl im Panel – sichtbar vor dem Start und im laufenden Betrieb – zeigt jeden Kandidaten mit seinem Schnittstellennamen und markiert VPN-Tunnel; wer eine Adresse wählt, rückt ihre URL nach vorn und erzeugt den Kopplungslink neu mit genau diesem Host, sodass der kopierte Link auf einem Gerät funktioniert, das diesen Rechner nur über das VPN erreicht – ohne die URL von Hand zu bearbeiten. Ein QR-Code unter dem Kopplungslink lässt sich direkt mit dem Telefon scannen. Die Auswahl wird gemerkt; verschwindet die gewählte Schnittstelle, fällt das Panel auf „Automatisch“ zurück, ohne die Auswahl zu vergessen. Der Server selbst bleibt unverändert und lauscht weiterhin auf allen Schnittstellen.
+
 ### Fehlerbehebungen
 
 - **Die Kopplung lässt sich jetzt auch aus der Electron-Shell verwalten.** Das Erstellen eines Kopplungslinks, das Auflisten gekoppelter Geräte und das Widerrufen eines Geräts existierten nur als Desktop-Befehle (Tauri); der WebSocket-Dispatcher, den die Electron-Shell und Browser-Clients verwenden, antwortete mit „Unknown command“, sodass das Fernzugriffs-Panel dort nicht funktionierte. Alle drei Befehle laufen jetzt auf beiden Transportwegen durch dieselben Kernfunktionen, damit sie nicht auseinanderdriften können; Regressionstests decken die neuen Dispatch-Routen ab – einschließlich des Erstellens eines echten Kopplungslinks gegen einen laufenden lokalen Server.

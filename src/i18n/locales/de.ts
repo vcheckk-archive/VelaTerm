@@ -281,6 +281,11 @@ const de: typeof en = {
   "remote.start": "Server starten", // Start Server
   "remote.portLabel": "Port", // Port
   "remote.portInvalid": "Port muss zwischen 1 und 65535 liegen", // Port must be between 1 and 65535
+  "remote.ipLabel": "IP-Adresse", // IP address
+  "remote.ipAuto": "Automatisch (erste LAN-Adresse)", // Automatic (first LAN address)
+  "remote.ipVpn": "VPN", // VPN
+  "remote.qrHint":
+    "Mit dem Handy scannen, um den Pairing-Link auf der gewählten Adresse zu öffnen.", // Scan with your phone to open the pairing link on the selected address.
   "remote.fingerprintLabel": "Zertifikat-Fingerabdruck (SHA-256)", // Certificate fingerprint (SHA-256)
   "remote.fingerprintHint":
     "Beim ersten Verbinden warnen Browser, dass das Zertifikat nicht vertrauenswürdig ist – bei einem selbstsignierten Zertifikat normal. Vergleichen Sie diesen Fingerabdruck, um sicherzugehen, dass es dieser Rechner ist.", // On first connect, browsers warn the certificate is untrusted…
