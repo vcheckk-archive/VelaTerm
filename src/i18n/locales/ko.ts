@@ -151,6 +151,8 @@ const ko: typeof en = {
   "changes.loading": "불러오는 중…",
   "changes.loadingDiff": "diff 불러오는 중…",
   "changes.noChanges": "변경 사항 없음",
+  "changes.refresh": "새로 고침",
+  "changes.notRepo": "Git 저장소가 아닙니다",
   "changes.selectFile": "파일을 선택하세요",
   "changes.binary": "바이너리 파일 — 줄 단위 diff 불가",
   "tree.merge": "Merge…", // TODO translate
@@ -601,6 +603,14 @@ const ko: typeof en = {
   "browser.addressPlaceholder": "URL 또는 검색어 입력", // Enter URL or search terms
   "browser.quickAccess": "빠른 실행", // Quick access
   "browser.loading": "로드 중…", // Loading…
+  // Application-exit confirmation and dormant restored sessions.
+  "quit.title": "VelaTerm을 종료할까요?",  // Quit VelaTerm?
+  "quit.body": "실행 중인 터미널과 에이전트 세션이 모두 중지됩니다.",  // Any running terminal and agent sessions will be stopped.
+  "quit.saveWorkspace": "작업 공간 저장",  // Save workspace
+  "quit.saveWorkspaceHint": "다음에 같은 탭과 분할을 복원합니다. 터미널은 복원되지만 다시 실행되지는 않습니다.",  // Reopen the same tabs and splits next time. Terminals are restored but not restarted.
+  "quit.confirm": "종료",  // Quit
+  "dormant.body": "저장된 작업 공간에서 복원했습니다. 아직 실행 중인 프로세스가 없습니다.",  // Restored from your saved workspace. No process is running yet.
+  "dormant.start": "시작",  // Start
   "overlimit.title": (max) => `백그라운드 유지가 한도를 초과했습니다 (최대 ${max}개)`, // Background keep-alive over limit ({max})
   "overlimit.body": "All background tabs are working or awaiting your reply. Choose one to end:", // All background tabs are working or awaiting your reply. Choose one to end:
   "overlimit.kill": "End Selected", // End Selected

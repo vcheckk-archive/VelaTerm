@@ -162,6 +162,8 @@ const ru: typeof en = {
   "changes.loading": "Загрузка…",
   "changes.loadingDiff": "Загрузка diff…",
   "changes.noChanges": "Нет изменений",
+  "changes.refresh": "Обновить",
+  "changes.notRepo": "Не git-репозиторий",
   "changes.selectFile": "Выберите файл",
   "changes.binary": "Двоичный файл — построчный diff недоступен",
   "tree.merge": "Merge…", // TODO translate
@@ -623,6 +625,14 @@ const ru: typeof en = {
   "browser.addressPlaceholder": "Введите URL или поисковый запрос", // Enter URL or search terms
   "browser.quickAccess": "Быстрый доступ", // Quick access
   "browser.loading": "Загрузка…", // Loading…
+  // Application-exit confirmation and dormant restored sessions.
+  "quit.title": "Закрыть VelaTerm?",  // Quit VelaTerm?
+  "quit.body": "Все запущенные сеансы терминала и агента будут остановлены.",  // Any running terminal and agent sessions will be stopped.
+  "quit.saveWorkspace": "Сохранить рабочее пространство",  // Save workspace
+  "quit.saveWorkspaceHint": "В следующий раз откроются те же вкладки и разделения. Терминалы восстанавливаются, но не запускаются заново.",  // Reopen the same tabs and splits next time. Terminals are restored but not restarted.
+  "quit.confirm": "Закрыть",  // Quit
+  "dormant.body": "Восстановлено из сохранённого рабочего пространства. Процесс ещё не запущен.",  // Restored from your saved workspace. No process is running yet.
+  "dormant.start": "Запустить",  // Start
   "overlimit.title": (max) => `Превышен лимит фоновых вкладок (${max})`, // Background keep-alive over limit ({max})
   "overlimit.body": "All background tabs are working or awaiting your reply. Choose one to end:", // All background tabs are working or awaiting your reply. Choose one to end:
   "overlimit.kill": "End Selected", // End Selected

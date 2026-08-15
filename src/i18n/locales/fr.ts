@@ -152,6 +152,8 @@ const fr: typeof en = {
   "changes.loading": "Chargement…",
   "changes.loadingDiff": "Chargement du diff…",
   "changes.noChanges": "Aucune modification",
+  "changes.refresh": "Actualiser",
+  "changes.notRepo": "Pas un dépôt git",
   "changes.selectFile": "Sélectionnez un fichier",
   "changes.binary": "Fichier binaire — diff par ligne indisponible",
   "tree.merge": "Merge…", // TODO translate
@@ -607,6 +609,14 @@ const fr: typeof en = {
   "browser.addressPlaceholder": "Saisir une URL ou des termes de recherche", // Enter URL or search terms
   "browser.quickAccess": "Accès rapide", // Quick access
   "browser.loading": "Chargement…", // Loading…
+  // Application-exit confirmation and dormant restored sessions.
+  "quit.title": "Quitter VelaTerm ?",  // Quit VelaTerm?
+  "quit.body": "Toutes les sessions de terminal et d'agent en cours seront arrêtées.",  // Any running terminal and agent sessions will be stopped.
+  "quit.saveWorkspace": "Enregistrer l'espace de travail",  // Save workspace
+  "quit.saveWorkspaceHint": "Rouvrir les mêmes onglets et divisions la prochaine fois. Les terminaux sont restaurés, mais pas redémarrés.",  // Reopen the same tabs and splits next time. Terminals are restored but not restarted.
+  "quit.confirm": "Quitter",  // Quit
+  "dormant.body": "Restauré depuis l'espace de travail enregistré. Aucun processus n'est encore en cours.",  // Restored from your saved workspace. No process is running yet.
+  "dormant.start": "Démarrer",  // Start
   "overlimit.title": (max) => `Limite d'arrière-plan dépassée (${max})`, // Background keep-alive over limit ({max})
   "overlimit.body": "All background tabs are working or awaiting your reply. Choose one to end:", // All background tabs are working or awaiting your reply. Choose one to end:
   "overlimit.kill": "End Selected", // End Selected

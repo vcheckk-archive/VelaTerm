@@ -28,6 +28,35 @@ pub fn take_open_project_request(pending: State<crate::PendingOpenProject>) -> O
     pending.0.lock().unwrap().take()
 }
 
+/// Quit-confirmation handshake. The run-loop emits `app://quit-requested` instead of showing a native dialog;
+/// the frontend acknowledges immediately, then reports the user's decision. These are pure in-memory flag
+/// updates plus the exit call, so a synchronous command is correct here.
+///
+/// Acknowledge that the frontend dialog is on screen, cancelling the native-dialog watchdog.
+#[tauri::command]
+pub fn quit_prompt_ack(state: State<crate::QuitState>) {
+    state
+        .acked
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// The user approved the exit. Any workspace snapshot has already been written by the frontend.
+#[tauri::command]
+pub fn confirm_quit(app: AppHandle, state: State<crate::QuitState>) {
+    use std::sync::atomic::Ordering;
+    state.pending.store(false, Ordering::SeqCst);
+    state.confirmed.store(true, Ordering::SeqCst);
+    app.exit(0);
+}
+
+/// The user dismissed the dialog. Clearing `pending` lets a later quit request prompt again.
+#[tauri::command]
+pub fn cancel_quit(state: State<crate::QuitState>) {
+    use std::sync::atomic::Ordering;
+    state.pending.store(false, Ordering::SeqCst);
+    state.acked.store(false, Ordering::SeqCst);
+}
+
 /// VS Code-style shell command management. Native macOS settings/menu actions query, install, or
 /// uninstall `vela` directly so browser/remote clients cannot modify the host PATH.
 #[tauri::command]

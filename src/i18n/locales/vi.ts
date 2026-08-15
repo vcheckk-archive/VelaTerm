@@ -152,6 +152,8 @@ const vi: typeof en = {
   "changes.loading": "Đang tải…",
   "changes.loadingDiff": "Đang tải khác biệt…",
   "changes.noChanges": "Không có thay đổi",
+  "changes.refresh": "Làm mới",
+  "changes.notRepo": "Không phải kho git",
   "changes.selectFile": "Chọn tệp để xem",
   "changes.binary": "Tệp nhị phân — không thể xem khác biệt theo dòng",
   "tree.merge": "Hợp nhất…",
@@ -589,6 +591,14 @@ const vi: typeof en = {
   "browser.addressPlaceholder": "Nhập URL hoặc từ khóa tìm kiếm",
   "browser.quickAccess": "Truy cập nhanh",
   "browser.loading": "Đang tải…",
+  // Application-exit confirmation and dormant restored sessions.
+  "quit.title": "Thoát VelaTerm?",  // Quit VelaTerm?
+  "quit.body": "Mọi phiên terminal và agent đang chạy sẽ bị dừng.",  // Any running terminal and agent sessions will be stopped.
+  "quit.saveWorkspace": "Lưu không gian làm việc",  // Save workspace
+  "quit.saveWorkspaceHint": "Lần sau mở lại đúng các thẻ và khung chia này. Terminal được khôi phục nhưng không tự khởi động lại.",  // Reopen the same tabs and splits next time. Terminals are restored but not restarted.
+  "quit.confirm": "Thoát",  // Quit
+  "dormant.body": "Đã khôi phục từ không gian làm việc đã lưu. Chưa có tiến trình nào chạy.",  // Restored from your saved workspace. No process is running yet.
+  "dormant.start": "Khởi động",  // Start
   "overlimit.title": (max: number) => `Số thẻ duy trì nền vượt giới hạn (${max})`,
   "overlimit.body": "Tất cả thẻ nền đang làm việc hoặc chờ bạn trả lời. Chọn một thẻ để kết thúc:",
   "overlimit.kill": "Kết thúc mục đã chọn",

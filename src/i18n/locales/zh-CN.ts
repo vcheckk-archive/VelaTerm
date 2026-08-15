@@ -149,6 +149,8 @@ const zhCN: typeof en = {
   "changes.loading": "加载中…",
   "changes.loadingDiff": "加载 diff…",
   "changes.noChanges": "没有改动",
+  "changes.refresh": "刷新",
+  "changes.notRepo": "不是 git 仓库",
   "changes.selectFile": "选择文件查看",
   "changes.binary": "二进制文件，无法逐行 diff",
   "tree.merge": "合并…",
@@ -596,6 +598,14 @@ const zhCN: typeof en = {
   "browser.addressPlaceholder": "输入网址或搜索词",
   "browser.quickAccess": "快速访问",
   "browser.loading": "加载中…",
+  // Application-exit confirmation and dormant restored sessions.
+  "quit.title": "退出 VelaTerm？",  // Quit VelaTerm?
+  "quit.body": "正在运行的终端和 agent 会话都会被停止。",  // Any running terminal and agent sessions will be stopped.
+  "quit.saveWorkspace": "保存工作空间",  // Save workspace
+  "quit.saveWorkspaceHint": "下次打开时恢复相同的标签页和分屏。终端会恢复出来，但不会自动重启。",  // Reopen the same tabs and splits next time. Terminals are restored but not restarted.
+  "quit.confirm": "退出",  // Quit
+  "dormant.body": "已从保存的工作空间恢复，进程还没有启动。",  // Restored from your saved workspace. No process is running yet.
+  "dormant.start": "启动",  // Start
   "overlimit.title": (max) => `后台保活已超上限（${max} 个）`,
   "overlimit.body": "所有后台标签都在工作或等你回复，请选择要结束的标签：",
   "overlimit.kill": "结束选中",

@@ -151,6 +151,8 @@ const ja: typeof en = {
   "changes.loading": "読み込み中…",
   "changes.loadingDiff": "差分を読み込み中…",
   "changes.noChanges": "変更なし",
+  "changes.refresh": "更新",
+  "changes.notRepo": "Git リポジトリではありません",
   "changes.selectFile": "ファイルを選択してください",
   "changes.binary": "バイナリファイル — 行差分は表示できません",
   "tree.merge": "Merge…", // TODO translate
@@ -603,6 +605,14 @@ const ja: typeof en = {
   "browser.addressPlaceholder": "URL または検索語を入力", // Enter URL or search terms
   "browser.quickAccess": "クイックアクセス", // Quick access
   "browser.loading": "読み込み中…", // Loading…
+  // Application-exit confirmation and dormant restored sessions.
+  "quit.title": "VelaTerm を終了しますか？",  // Quit VelaTerm?
+  "quit.body": "実行中のターミナルとエージェントのセッションはすべて停止します。",  // Any running terminal and agent sessions will be stopped.
+  "quit.saveWorkspace": "ワークスペースを保存",  // Save workspace
+  "quit.saveWorkspaceHint": "次回、同じタブと分割を復元します。ターミナルは復元されますが再起動はされません。",  // Reopen the same tabs and splits next time. Terminals are restored but not restarted.
+  "quit.confirm": "終了",  // Quit
+  "dormant.body": "保存したワークスペースから復元しました。プロセスはまだ起動していません。",  // Restored from your saved workspace. No process is running yet.
+  "dormant.start": "起動",  // Start
   "overlimit.title": (max) => `バックグラウンド常駐が上限を超えています（最大 ${max} 件）`, // Background keep-alive over limit ({max})
   "overlimit.body": "All background tabs are working or awaiting your reply. Choose one to end:", // All background tabs are working or awaiting your reply. Choose one to end:
   "overlimit.kill": "End Selected", // End Selected

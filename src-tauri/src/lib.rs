@@ -54,6 +54,21 @@ use std::path::{Path, PathBuf};
 #[cfg(feature = "gui")]
 pub(crate) struct PendingOpenProject(pub std::sync::Mutex<Option<String>>);
 
+/// Quit-confirmation handshake state shared by the run-loop and the `confirm_quit`/`cancel_quit` commands.
+///
+/// The frontend owns the confirmation dialog so it can offer the "save workspace" checkbox and localized copy,
+/// neither of which a native message dialog supports. `pending` guards against duplicate prompts, and
+/// `confirmed` lets the run-loop distinguish an approved exit from a fresh user request.
+#[cfg(feature = "gui")]
+#[derive(Default)]
+pub(crate) struct QuitState {
+    pub confirmed: std::sync::atomic::AtomicBool,
+    pub pending: std::sync::atomic::AtomicBool,
+    /// Set once the frontend reports that it displayed the dialog. A frozen or crashed webview never acknowledges,
+    /// so the watchdog falls back to the native dialog and the application stays quittable.
+    pub acked: std::sync::atomic::AtomicBool,
+}
+
 /// Brief `vela` CLI help invoked through a hidden shim argument so normal GUI startup stays quiet.
 pub fn print_vela_help() {
     println!("usage: vela <project-path>\n\nOpen a project in VelaTerm, or switch to it if it is already open.");
@@ -396,6 +411,7 @@ fn run_with_builder(builder: tauri::Builder<tauri::Wry>, initial_open_project: O
         .manage(PtyManager::new())
         .manage(WebServer::new())
         .manage(browser::BrowserManager::new())
+        .manage(QuitState::default())
         .manage(PendingOpenProject(std::sync::Mutex::new(
             initial_open_project.map(|p| p.to_string_lossy().into_owned()),
         )))
@@ -791,6 +807,9 @@ fn run_with_builder(builder: tauri::Builder<tauri::Wry>, initial_open_project: O
             // dispatch command automatically covers desktop too.
             commands::desktop_call,
             commands::take_open_project_request,
+            commands::quit_prompt_ack,
+            commands::confirm_quit,
+            commands::cancel_quit,
             commands::vela_command_status,
             commands::install_vela_command,
             commands::uninstall_vela_command,
@@ -841,46 +860,41 @@ fn run_with_builder(builder: tauri::Builder<tauri::Wry>, initial_open_project: O
         .build(tauri_context())
         .expect("error while building tauri application")
         .run({
-            use std::sync::{
-                atomic::{AtomicBool, Ordering},
-                Arc,
-            };
-            let quit_confirmed = Arc::new(AtomicBool::new(false));
-            let quit_confirmation_pending = Arc::new(AtomicBool::new(false));
+            use std::sync::atomic::Ordering;
             move |app, event| {
-                // Confirm user-triggered exits natively. Programmatic exit/restart with a code already
-                // belongs to a confirmed workflow and must not prompt again.
+                // Confirm user-triggered exits in the frontend so the dialog can carry localized copy and the
+                // "save workspace" checkbox. Programmatic exit/restart with a code already belongs to a confirmed
+                // workflow and must not prompt again.
                 let request_quit_confirmation = |app: &tauri::AppHandle| {
-                    if quit_confirmed.load(Ordering::SeqCst)
-                        || quit_confirmation_pending.swap(true, Ordering::SeqCst)
+                    let st = app.state::<QuitState>();
+                    if st.confirmed.load(Ordering::SeqCst) || st.pending.swap(true, Ordering::SeqCst)
                     {
                         return;
                     }
-                    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+                    st.acked.store(false, Ordering::SeqCst);
+                    use tauri::Emitter;
+                    if app.emit("app://quit-requested", ()).is_err() {
+                        native_quit_confirmation(app);
+                        return;
+                    }
+                    // A webview that never acknowledges within the grace period would leave the application
+                    // unquittable, so fall back to the native dialog.
                     let app = app.clone();
-                    let confirmed = quit_confirmed.clone();
-                    let pending = quit_confirmation_pending.clone();
-                    app.clone()
-                        .dialog()
-                        .message("Any running terminal and agent sessions will be stopped.")
-                        .title("Quit VelaTerm?")
-                        .kind(MessageDialogKind::Info)
-                        .buttons(MessageDialogButtons::OkCancelCustom(
-                            "Quit".to_string(),
-                            "Cancel".to_string(),
-                        ))
-                        .show(move |should_quit| {
-                            pending.store(false, Ordering::SeqCst);
-                            if should_quit {
-                                confirmed.store(true, Ordering::SeqCst);
-                                app.exit(0);
-                            }
-                        });
+                    std::thread::spawn(move || {
+                        std::thread::sleep(std::time::Duration::from_secs(5));
+                        let st = app.state::<QuitState>();
+                        if st.pending.load(Ordering::SeqCst)
+                            && !st.acked.load(Ordering::SeqCst)
+                            && !st.confirmed.load(Ordering::SeqCst)
+                        {
+                            native_quit_confirmation(&app);
+                        }
+                    });
                 };
 
                 match &event {
                     tauri::RunEvent::ExitRequested { code: None, api, .. }
-                        if !quit_confirmed.load(Ordering::SeqCst) =>
+                        if !app.state::<QuitState>().confirmed.load(Ordering::SeqCst) =>
                     {
                         api.prevent_exit();
                         request_quit_confirmation(app);
@@ -892,7 +906,9 @@ fn run_with_builder(builder: tauri::Builder<tauri::Wry>, initial_open_project: O
                         label,
                         event: tauri::WindowEvent::CloseRequested { api, .. },
                         ..
-                    } if label == "main" && !quit_confirmed.load(Ordering::SeqCst) => {
+                    } if label == "main"
+                        && !app.state::<QuitState>().confirmed.load(Ordering::SeqCst) =>
+                    {
                         api.prevent_close();
                         request_quit_confirmation(app);
                     }
@@ -913,6 +929,33 @@ fn run_with_builder(builder: tauri::Builder<tauri::Wry>, initial_open_project: O
                         }
                     }
                 }
+            }
+        });
+}
+
+/// Degraded quit confirmation used when the webview cannot present the frontend dialog. A native message dialog
+/// supports neither a checkbox nor translated copy, so it only offers plain quit/cancel and never saves the
+/// workspace. Copy stays English to match the other native dialogs.
+#[cfg(feature = "gui")]
+fn native_quit_confirmation(app: &tauri::AppHandle) {
+    use std::sync::atomic::Ordering;
+    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+    let app = app.clone();
+    app.clone()
+        .dialog()
+        .message("Any running terminal and agent sessions will be stopped.")
+        .title("Quit VelaTerm?")
+        .kind(MessageDialogKind::Info)
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            "Quit".to_string(),
+            "Cancel".to_string(),
+        ))
+        .show(move |should_quit| {
+            let st = app.state::<QuitState>();
+            st.pending.store(false, Ordering::SeqCst);
+            if should_quit {
+                st.confirmed.store(true, Ordering::SeqCst);
+                app.exit(0);
             }
         });
 }

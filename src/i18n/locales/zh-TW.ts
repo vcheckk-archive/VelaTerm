@@ -150,6 +150,8 @@ const zhTW: typeof en = {
   "changes.loading": "載入中…",
   "changes.loadingDiff": "載入 diff…",
   "changes.noChanges": "沒有變更",
+  "changes.refresh": "重新整理",
+  "changes.notRepo": "不是 git 儲存庫",
   "changes.selectFile": "選擇檔案查看",
   "changes.binary": "二進位檔案，無法逐行 diff",
   "tree.merge": "合併…",
@@ -597,6 +599,14 @@ const zhTW: typeof en = {
   "browser.addressPlaceholder": "輸入網址或搜尋字詞", // Enter URL or search terms
   "browser.quickAccess": "快速存取", // Quick access
   "browser.loading": "載入中…", // Loading…
+  // Application-exit confirmation and dormant restored sessions.
+  "quit.title": "結束 VelaTerm？",  // Quit VelaTerm?
+  "quit.body": "正在執行的終端機和 agent 工作階段都會被停止。",  // Any running terminal and agent sessions will be stopped.
+  "quit.saveWorkspace": "儲存工作區",  // Save workspace
+  "quit.saveWorkspaceHint": "下次開啟時還原相同的分頁和分割。終端機會還原出來，但不會自動重新啟動。",  // Reopen the same tabs and splits next time. Terminals are restored but not restarted.
+  "quit.confirm": "結束",  // Quit
+  "dormant.body": "已從儲存的工作區還原，程序尚未啟動。",  // Restored from your saved workspace. No process is running yet.
+  "dormant.start": "啟動",  // Start
   "overlimit.title": (max) => `背景保活已超上限（${max} 個）`, // Background keep-alive over limit ({max})
   "overlimit.body": "所有背景分頁都在工作或等你回覆，請選擇要結束的分頁：", // All background tabs are working or awaiting your reply. Choose one to end:
   "overlimit.kill": "結束選取", // End Selected
