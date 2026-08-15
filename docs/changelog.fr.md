@@ -1,3 +1,9 @@
+## Non publié
+
+### Corrections
+
+- **L'appairage peut désormais être géré depuis le shell Electron.** La création d'un lien d'appairage, la liste des appareils appairés et la révocation d'un appareil n'existaient que comme commandes de bureau (Tauri) ; le répartiteur WebSocket utilisé par le shell Electron et les clients navigateur répondait « Unknown command », laissant le panneau d'accès distant inopérant à cet endroit. Les trois commandes passent désormais par les mêmes fonctions centrales sur les deux transports, si bien qu'elles ne peuvent plus diverger, et des tests de régression couvrent les nouvelles routes de répartition — y compris la création d'un véritable lien d'appairage auprès d'un serveur local en cours d'exécution.
+
 ## v0.1.100 — 2026-08-10
 
 ### Agents IA

@@ -1,3 +1,9 @@
+## Unveröffentlicht
+
+### Fehlerbehebungen
+
+- **Die Kopplung lässt sich jetzt auch aus der Electron-Shell verwalten.** Das Erstellen eines Kopplungslinks, das Auflisten gekoppelter Geräte und das Widerrufen eines Geräts existierten nur als Desktop-Befehle (Tauri); der WebSocket-Dispatcher, den die Electron-Shell und Browser-Clients verwenden, antwortete mit „Unknown command“, sodass das Fernzugriffs-Panel dort nicht funktionierte. Alle drei Befehle laufen jetzt auf beiden Transportwegen durch dieselben Kernfunktionen, damit sie nicht auseinanderdriften können; Regressionstests decken die neuen Dispatch-Routen ab – einschließlich des Erstellens eines echten Kopplungslinks gegen einen laufenden lokalen Server.
+
 ## v0.1.100 — 2026-08-10
 
 ### KI-Agenten

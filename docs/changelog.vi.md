@@ -1,3 +1,9 @@
+## Chưa phát hành
+
+### Sửa lỗi
+
+- **Giờ đây có thể quản lý ghép đôi từ shell Electron.** Việc tạo liên kết ghép đôi, liệt kê các thiết bị đã ghép đôi và thu hồi một thiết bị trước đây chỉ tồn tại dưới dạng lệnh trên máy tính (Tauri); bộ điều phối WebSocket mà shell Electron và các trình khách trình duyệt sử dụng trả về "Unknown command", khiến bảng truy cập từ xa không hoạt động ở đó. Cả ba lệnh nay đều đi qua cùng các hàm lõi trên cả hai kênh truyền, nên chúng không thể lệch nhau, và các bài kiểm tra hồi quy bao phủ các tuyến điều phối mới — bao gồm việc tạo một liên kết ghép đôi thật với một máy chủ cục bộ đang chạy.
+
 ## v0.1.100 — 2026-08-10
 
 ### Tác nhân AI

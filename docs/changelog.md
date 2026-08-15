@@ -1,9 +1,17 @@
 # Changelog
 
-> Created: 2026-07-09 16:10 · Updated: 2026-08-11
+> Created: 2026-07-09 16:10 · Updated: 2026-08-14
 
 All notable changes to VelaTerm are documented here, newest first.
 v0.1.91 is the first public release; earlier version numbers were internal iterations and are not covered.
+
+---
+
+## Unreleased
+
+### Fixed
+
+- **Pairing can be managed from the Electron shell.** Creating a pairing link, listing paired devices and revoking a device existed only as desktop (Tauri) commands; the WebSocket dispatcher used by the Electron shell and browser clients answered "Unknown command", leaving the remote-access panel broken there. All three commands now go through the same core functions on both transports, so the two cannot drift apart, and regression tests cover the new dispatch routes — including creating a real pairing link against a running local server.
 
 ---
 

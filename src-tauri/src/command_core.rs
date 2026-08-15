@@ -759,3 +759,23 @@ pub fn web_server_stop(ctx: &AppCtx) -> Result<(), String> {
 pub fn web_server_status(ctx: &AppCtx) -> crate::web::WebServerStatus {
     ctx.remote_web().status()
 }
+
+/// Generates a browser pairing link with the shared token and server public key in the URL fragment.
+/// `address` chooses the interface IP; `rotate` replaces the token, invalidates old links, and clears devices.
+pub fn web_pairing_create(
+    ctx: &AppCtx,
+    address: Option<String>,
+    rotate: bool,
+) -> Result<crate::web::PairingInfo, String> {
+    ctx.remote_web().create_pairing(address, rotate)
+}
+
+/// Lists paired devices that have actually connected for the management panel.
+pub fn web_devices_list(ctx: &AppCtx) -> Vec<crate::web::DeviceEntry> {
+    ctx.remote_web().list_devices()
+}
+
+/// Removes a device registration display entry. Shared links can still reconnect; rotate to revoke all.
+pub fn web_device_revoke(ctx: &AppCtx, device_id: &str) -> bool {
+    ctx.remote_web().revoke_device(device_id)
+}

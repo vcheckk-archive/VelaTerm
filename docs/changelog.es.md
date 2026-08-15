@@ -1,3 +1,9 @@
+## Sin publicar
+
+### Correcciones
+
+- **El emparejamiento ya se puede gestionar desde el shell de Electron.** Crear un enlace de emparejamiento, listar los dispositivos emparejados y revocar un dispositivo solo existían como comandos de escritorio (Tauri); el despachador WebSocket que usan el shell de Electron y los clientes de navegador respondía «Unknown command», dejando inservible el panel de acceso remoto en ese entorno. Los tres comandos pasan ahora por las mismas funciones centrales en ambos transportes, de modo que no pueden divergir, y pruebas de regresión cubren las nuevas rutas de despacho, incluida la creación de un enlace de emparejamiento real contra un servidor local en ejecución.
+
 ## v0.1.100 — 2026-08-10
 
 ### Agentes de IA

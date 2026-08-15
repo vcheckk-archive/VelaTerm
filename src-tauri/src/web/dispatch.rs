@@ -448,6 +448,18 @@ pub fn dispatch(app: &AppCtx, cmd: &str, args: &Value, source: &str) -> Result<V
             Ok(Value::Null)
         }
         "web_server_status" => to_value(core::web_server_status(app)),
+        // Pairing management mirrors the Tauri commands so the Electron/browser remote-access panel
+        // works over WebSocket exactly like the desktop panel does over Tauri IPC.
+        "web_pairing_create" => to_value(core::web_pairing_create(
+            app,
+            opt_str(args, "address"),
+            args.get("rotate").and_then(Value::as_bool).unwrap_or(false),
+        )?),
+        "web_devices_list" => to_value(core::web_devices_list(app)),
+        "web_device_revoke" => Ok(Value::Bool(core::web_device_revoke(
+            app,
+            &req_str(args, "deviceId")?,
+        ))),
 
         "spawn_skills_installed" => Ok(Value::Bool(crate::agent::spawn_cli::skills_installed())),
         "install_spawn_skills" => {
@@ -534,4 +546,132 @@ fn req_bool(args: &Value, key: &str) -> Result<bool, String> {
 fn req_kind<T: serde::de::DeserializeOwned>(args: &Value, key: &str) -> Result<T, String> {
     let v = args.get(key).cloned().unwrap_or(Value::Null);
     serde_json::from_value(v).map_err(|e| format!("Invalid value for parameter {key}: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::dispatch;
+    use crate::host::{AppCtx, HeadlessHost};
+    use crate::pty::manager::DESKTOP_SOURCE;
+    use serde_json::{json, Value};
+    use std::sync::Arc;
+
+    /// Side-effect-free headless context with an isolated temporary database; the remote-access
+    /// WebServer is constructed but not started, matching the panel's initial state.
+    fn test_ctx() -> AppCtx {
+        let data_dir =
+            std::env::temp_dir().join(format!("vlx-dispatch-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&data_dir).expect("failed to create the temporary directory");
+        let db = crate::db::Db::open(&data_dir.join("test.db"))
+            .expect("failed to open the test database");
+        AppCtx::Headless(Arc::new(HeadlessHost::new(data_dir, db)))
+    }
+
+    /// Regression for the Electron/browser pairing panel: the three pairing commands must be routed
+    /// by WebSocket dispatch instead of falling through to "Unknown command" (they were Tauri-only).
+    #[test]
+    fn pairing_commands_are_dispatched() {
+        let app = test_ctx();
+
+        // Stopped server: pairing creation fails with the WebServer's own error, proving the call
+        // reached core rather than the unknown-command fallback.
+        let err = dispatch(
+            &app,
+            "web_pairing_create",
+            &json!({ "address": null, "rotate": false }),
+            DESKTOP_SOURCE,
+        )
+        .unwrap_err();
+        assert_eq!(err, "Web server not started");
+
+        // The arm tolerates omitted keys (address defaults to None, rotate to false); a bare WS
+        // client sending an empty args object must reach core the same way.
+        let err = dispatch(&app, "web_pairing_create", &json!({}), DESKTOP_SOURCE).unwrap_err();
+        assert_eq!(err, "Web server not started");
+
+        // Device listing returns an empty list while stopped, like the Tauri command does.
+        let devices = dispatch(&app, "web_devices_list", &json!({}), DESKTOP_SOURCE).unwrap();
+        assert_eq!(devices, json!([]));
+
+        // Revocation returns false while stopped; the camelCase key matches webServer.ts.
+        let revoked = dispatch(
+            &app,
+            "web_device_revoke",
+            &json!({ "deviceId": "dev-a" }),
+            DESKTOP_SOURCE,
+        )
+        .unwrap();
+        assert_eq!(revoked, Value::Bool(false));
+    }
+
+    /// Success path on a running loopback server (the Electron mode this ticket targets): pairing
+    /// creation over WebSocket dispatch returns a real pairing URL, and rotate issues a new token.
+    #[test]
+    fn pairing_create_works_on_running_loopback_server() {
+        let app = test_ctx();
+
+        // Find a free loopback port and start the real server there in plaintext mode. The probed
+        // port can be stolen between drop and the server's own preflight bind while other tests
+        // bind ports in parallel, so retry with a fresh ephemeral port instead of flaking.
+        let mut port = 0;
+        let mut started = Err("never attempted".to_string());
+        for _ in 0..5 {
+            port = std::net::TcpListener::bind(("127.0.0.1", 0))
+                .expect("failed to bind an ephemeral port")
+                .local_addr()
+                .expect("failed to read the ephemeral port")
+                .port();
+            started = app.remote_web().start(
+                app.clone(),
+                "test-pw",
+                Some(port),
+                crate::web::ServeMode::LoopbackHttp,
+            );
+            if started.is_ok() {
+                break;
+            }
+        }
+        started.expect("failed to start the loopback web server after retries");
+
+        let first = dispatch(
+            &app,
+            "web_pairing_create",
+            &json!({ "address": "127.0.0.1", "rotate": false }),
+            DESKTOP_SOURCE,
+        )
+        .expect("pairing creation failed on a running server");
+        let url = first["url"].as_str().expect("url missing from PairingInfo");
+        assert!(
+            url.starts_with(&format!("http://127.0.0.1:{port}/#pair=")),
+            "unexpected pairing URL: {url}"
+        );
+        let first_token = first["deviceToken"]
+            .as_str()
+            .expect("deviceToken missing from PairingInfo");
+        assert!(!first_token.is_empty(), "device token must not be empty");
+
+        // Rotation must invalidate the previous shared token by issuing a different one.
+        let rotated = dispatch(
+            &app,
+            "web_pairing_create",
+            &json!({ "address": "127.0.0.1", "rotate": true }),
+            DESKTOP_SOURCE,
+        )
+        .expect("pairing rotation failed on a running server");
+        let rotated_token = rotated["deviceToken"]
+            .as_str()
+            .expect("deviceToken missing after rotation");
+        assert_ne!(rotated_token, first_token, "rotate must issue a new token");
+
+        // Stop the server so the test leaves no background thread behind.
+        app.remote_web().stop();
+    }
+
+    /// The deviceId argument is required; a missing key must fail argument extraction, not panic.
+    #[test]
+    fn device_revoke_requires_device_id() {
+        let app = test_ctx();
+        let err = dispatch(&app, "web_device_revoke", &json!({}), DESKTOP_SOURCE).unwrap_err();
+        assert_eq!(err, "Missing string parameter deviceId");
+    }
 }
